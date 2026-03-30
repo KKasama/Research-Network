@@ -335,13 +335,24 @@ KEYBERT_MODELS = {
 def detect_domain(selected_topics, concept_name=""):
     """トピック名・Concept名からドメインを自動判定"""
     text = " ".join(selected_topics).lower() + " " + concept_name.lower()
-    scores = {domain: 0 for domain in KEYBERT_MODELS}
-    for domain, (_, _, keywords) in KEYBERT_MODELS.items():
-        for kw in keywords:
-            if kw in text:
-                scores[domain] += 1
-    best = max(scores, key=lambda d: scores[d])
-    return best if scores[best] > 0 else "general"
+    biomedical_kws = ["health","medical","clinical","patient","disease","therapy",
+        "rehabilitation","nursing","medicine","hospital","drug","cancer","surgery",
+        "diagnostic","treatment","pharmaceutical","biology","biochem","gene",
+        "protein","cell","neuro","cardio","ortho","physio","psych","dental"]
+    materials_kws = ["material","alloy","crystal","polymer","thin film",
+        "nanoparticle","semiconductor","ceramic","composite","synthesis"]
+    battery_kws = ["battery","electrolyte","cathode","anode","lithium",
+        "ion","electrode","solid state","fuel cell","electrochemical"]
+    bio_score = sum(1 for kw in biomedical_kws if kw in text)
+    mat_score = sum(1 for kw in materials_kws if kw in text)
+    bat_score = sum(1 for kw in battery_kws if kw in text)
+    if bio_score > 0 and bio_score >= bat_score and bio_score >= mat_score:
+        return "biomedical"
+    if bat_score > 0 and bat_score >= mat_score:
+        return "battery"
+    if mat_score > 0:
+        return "materials"
+    return "general"
 
 @st.cache_resource
 def load_keybert(model_name="batterydata/batteryscibert-cased"):
