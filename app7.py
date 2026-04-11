@@ -93,7 +93,7 @@ T = {
         "fetching": "論文取得中...",
         "fetched": "取得: ",
         "fetched_end": " 論文",
-        "keybert_running": "KeyBERT（BatterySciBERT）でキーワード抽出中...",
+        "keybert_running": "KeyBERT でキーワード抽出中...",
         "keybert_done": "キーワード抽出完了: ",
         "keybert_done_end": " キーワード",
         "building": "ネットワーク構築中...",
@@ -233,7 +233,7 @@ T = {
         "fetching": "Fetching papers...",
         "fetched": "Fetched: ",
         "fetched_end": " papers",
-        "keybert_running": "Extracting keywords with KeyBERT (BatterySciBERT)...",
+        "keybert_running": "Extracting keywords with KeyBERT...",
         "keybert_done": "Keyword extraction complete: ",
         "keybert_done_end": " keywords",
         "building": "Building network...",
@@ -330,6 +330,26 @@ KEYBERT_MODELS = {
     "materials":    ("m3rg-iitd/matscibert",               "MatSciBERT",          ["material", "alloy", "crystal", "polymer", "thin film", "nanoparticle", "semiconductor", "ceramic", "composite", "synthesis"]),
     "biomedical":   ("dmis-lab/biobert-base-cased-v1.2",   "BioBERT",             ["cancer", "protein", "gene", "drug", "clinical", "cell", "disease", "therapy", "patient", "diagnosis"]),
     "general":      ("all-MiniLM-L6-v2",                   "SentenceTransformers (general)", []),
+}
+
+# モデルの分野用途説明（日本語・英語）
+KEYBERT_MODEL_DOMAIN_LABELS = {
+    "ja": {
+        "batterydata/batteryscibert-cased":  "🔋 バッテリー・電気化学系",
+        "allenai/specter":                   "🔋 バッテリー・材料系",
+        "allenai-specter":                   "🔋 バッテリー・材料系",
+        "m3rg-iitd/matscibert":              "⚗️ 材料科学系",
+        "dmis-lab/biobert-base-cased-v1.2":  "🧬 生命科学・医療系",
+        "all-MiniLM-L6-v2":                  "🌐 一般（汎用）",
+    },
+    "en": {
+        "batterydata/batteryscibert-cased":  "🔋 Battery / Electrochemistry",
+        "allenai/specter":                   "🔋 Battery / Materials",
+        "allenai-specter":                   "🔋 Battery / Materials",
+        "m3rg-iitd/matscibert":              "⚗️ Materials Science",
+        "dmis-lab/biobert-base-cased-v1.2":  "🧬 Life Science / Medical",
+        "all-MiniLM-L6-v2":                  "🌐 General Purpose",
+    },
 }
 
 def detect_domain(selected_topics, concept_name=""):
@@ -1068,6 +1088,31 @@ with st.sidebar:
     st.header(t("settings"))
     analysis_type = st.radio(t("analysis_type"), t("analysis_options"))
 
+    # ── KeyBERTモデル選択（常時表示） ──
+    st.markdown("---")
+    st.markdown("🔬 **" + t("model_select") + "**")
+    _model_choices = [
+        (t("model_auto"),                  None,                               "🤖 " + ("分野を自動判定" if lang=="ja" else "Auto-detect domain")),
+        ("BatterySciBERT",                 "batterydata/batteryscibert-cased", "🔋 " + ("バッテリー・電気化学系" if lang=="ja" else "Battery / Electrochemistry")),
+        ("MatSciBERT",                     "m3rg-iitd/matscibert",             "⚗️ " + ("材料科学系" if lang=="ja" else "Materials Science")),
+        ("BioBERT",                        "dmis-lab/biobert-base-cased-v1.2", "🧬 " + ("生命科学・医療系" if lang=="ja" else "Life Science / Medical")),
+        ("SentenceTransformers (general)", "all-MiniLM-L6-v2",                 "🌐 " + ("一般（汎用）" if lang=="ja" else "General Purpose")),
+    ]
+    _model_radio_labels = [label + "  —  " + hint for label, _, hint in _model_choices]
+    _selected_model_idx = st.radio(
+        label="",
+        options=range(len(_model_radio_labels)),
+        format_func=lambda i: _model_radio_labels[i],
+        key="keybert_model_radio",
+        label_visibility="collapsed",
+    )
+    _chosen_display, _chosen_model_key, _ = _model_choices[_selected_model_idx]
+    st.session_state["keybert_model_label"] = _chosen_display
+    selected_model_label = _chosen_display
+    if _chosen_model_key:
+        st.caption("📦 `" + _chosen_model_key + "`")
+    st.markdown("---")
+
     st.markdown(t("topic_select"))
     tab1, tab2, tab_s = st.tabs([t("tab_browse"), t("tab_search"), t("tab_smart")])
 
@@ -1332,14 +1377,13 @@ with st.sidebar:
     min_links = st.slider(t("min_links"), 1, 10, 2)
     min_sim = st.slider(t("min_sim"), 0.05, 0.5, 0.15, 0.05)
 
-    # KeyBERT系分析タイプを選んだときだけモデル選択を表示
+    # SPECTER2モードトグル（KeyBERT系選択時のみ有効）
     kw_analysis_types = ["Keyword Co-occurrence（KeyBERT）", "著者類似度（KeyBERT）",
                          "Keyword Co-occurrence (KeyBERT)", "Author Similarity (KeyBERT)"]
     if analysis_type in kw_analysis_types:
         st.markdown("---")
         use_s2 = st.toggle(t("s2_mode"), key="use_s2_embedding")
         if use_s2:
-            # 環境変数から自動読み込み
             env_key = os.environ.get("S2_API_KEY", "")
             if env_key:
                 st.caption("🔑 " + ("S2 APIキー: 環境変数から自動読み込み済み" if lang=="ja" else "S2 API key loaded from environment variable"))
@@ -1349,16 +1393,9 @@ with st.sidebar:
             st.caption("🚀 " + ("SPECTER2（768次元）で全論文対応の高精度著者類似度を計算。DOI不要" if lang=="ja" else "High-precision author similarity using SPECTER2 (768-dim). No DOI required."))
         else:
             s2_api_key = os.environ.get("S2_API_KEY", "")
-            model_options = [t("model_auto")] + [v[1] for v in KEYBERT_MODELS.values()]
-            selected_model_label = st.selectbox(t("model_select"), model_options, key="keybert_model_label")
-            if selected_model_label == t("model_auto"):
-                st.caption("🤖 " + ("トピック・Conceptから分野を自動判定してモデルを切替" if lang=="ja" else "Auto-detects domain from topics/concepts and selects the best model"))
-            else:
-                st.caption("🔬 " + selected_model_label)
     else:
         use_s2 = False
         s2_api_key = ""
-        selected_model_label = t("model_auto")
 
     selected_topics = st.session_state.selected_topics
     if selected_topics:
@@ -1543,6 +1580,7 @@ if run:
     st.session_state.json_str = json.dumps({"network": vos_data})
     st.session_state.work_keywords = work_keywords
     st.session_state.last_analysis_type = analysis_type
+    st.session_state.works_cache = works  # ノード→論文逆引き用
 
 if st.session_state.vos_data:
     vos_data = st.session_state.vos_data
@@ -1570,16 +1608,196 @@ if st.session_state.vos_data:
             for label, desc in explanations[ana]:
                 st.markdown("- **" + label + "**: " + desc)
 
-    st.download_button(t("download_btn"), st.session_state.json_str, file_name="vosviewer_network.json", mime="application/json", use_container_width=True)
+    # ── Gephi GEXF エクスポート ──
+    def vosviewer_json_to_gexf(vos_data):
+        """VOSviewer JSON → Gephi GEXF (1.3) 変換"""
+        import xml.etree.ElementTree as ET
+        items = vos_data.get("items", [])
+        links = vos_data.get("links", [])
+
+        gexf = ET.Element("gexf", {
+            "xmlns": "http://gexf.net/1.3",
+            "xmlns:viz": "http://gexf.net/1.3/viz",
+            "version": "1.3"
+        })
+        meta = ET.SubElement(gexf, "meta")
+        ET.SubElement(meta, "description").text = "Exported from OpenAlex Research Network Portal"
+
+        graph = ET.SubElement(gexf, "graph", {
+            "mode": "static",
+            "defaultedgetype": "undirected"
+        })
+
+        # ノード属性定義
+        attrs_node = ET.SubElement(graph, "attributes", {"class": "node", "mode": "static"})
+        weight_keys = set()
+        for item in items:
+            weight_keys.update(item.get("weights", {}).keys())
+        weight_keys = sorted(weight_keys)
+        for i, wk in enumerate(weight_keys):
+            ET.SubElement(attrs_node, "attribute", {"id": str(i), "title": wk, "type": "float"})
+        if any(item.get("description") for item in items):
+            ET.SubElement(attrs_node, "attribute", {"id": str(len(weight_keys)), "title": "description", "type": "string"})
+
+        # エッジ属性定義
+        attrs_edge = ET.SubElement(graph, "attributes", {"class": "edge", "mode": "static"})
+        ET.SubElement(attrs_edge, "attribute", {"id": "0", "title": "strength", "type": "float"})
+
+        # ノード
+        nodes_el = ET.SubElement(graph, "nodes")
+        for item in items:
+            node = ET.SubElement(nodes_el, "node", {
+                "id": str(item.get("id", item.get("label", ""))),
+                "label": str(item.get("label", ""))
+            })
+            weights = item.get("weights", {})
+            if weights or item.get("description"):
+                attvals = ET.SubElement(node, "attvalues")
+                for i, wk in enumerate(weight_keys):
+                    if wk in weights:
+                        ET.SubElement(attvals, "attvalue", {"for": str(i), "value": str(weights[wk])})
+                desc = item.get("description", "")
+                if desc:
+                    ET.SubElement(attvals, "attvalue", {"for": str(len(weight_keys)), "value": desc})
+            # ノードサイズをvizで反映
+            main_weight = list(weights.values())[0] if weights else 1
+            ET.SubElement(node, "viz:size", {"value": str(max(1.0, float(main_weight)))})
+
+        # エッジ
+        edges_el = ET.SubElement(graph, "edges")
+        for i, link in enumerate(links):
+            edge = ET.SubElement(edges_el, "edge", {
+                "id": str(i),
+                "source": str(link.get("source_id", "")),
+                "target": str(link.get("target_id", "")),
+                "weight": str(link.get("strength", 1))
+            })
+            attvals = ET.SubElement(edge, "attvalues")
+            ET.SubElement(attvals, "attvalue", {"for": "0", "value": str(link.get("strength", 1))})
+
+        ET.indent(gexf, space="  ")
+        return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(gexf, encoding="unicode")
+
+    gexf_str = vosviewer_json_to_gexf(vos_data)
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        st.download_button(t("download_btn"), st.session_state.json_str, file_name="vosviewer_network.json", mime="application/json", use_container_width=True)
+    with col_dl2:
+        st.download_button(
+            label="⬇ Gephi GEXF ダウンロード" if lang=="ja" else "⬇ Download Gephi GEXF",
+            data=gexf_str,
+            file_name="gephi_network.gexf",
+            mime="application/xml",
+            use_container_width=True,
+            help="Gephi で開くには: ファイル → 開く → gephi_network.gexf" if lang=="ja" else "In Gephi: File → Open → gephi_network.gexf"
+        )
+
     st.markdown(t("vos_title"))
     st.markdown(t("vos_step1"))
     st.markdown(t("vos_step2"))
     st.markdown(t("vos_step3"))
 
+    # Gephi手順
+    if lang == "ja":
+        st.markdown("### Gephi で開く手順")
+        st.markdown("1. 上の **⬇ Gephi GEXF ダウンロード** を押して `.gexf` ファイルを保存")
+        st.markdown("2. Gephi を起動 → **ファイル** → **開く** → ダウンロードした `.gexf` を選択")
+        st.markdown("3. **レイアウト** パネルで `ForceAtlas 2` または `Fruchterman Reingold` を実行")
+        st.markdown("4. **外観** パネルでノードサイズ・色を `重み` 属性で調整")
+    else:
+        st.markdown("### How to open in Gephi")
+        st.markdown("1. Click **⬇ Download Gephi GEXF** above to save the `.gexf` file")
+        st.markdown("2. Launch Gephi → **File** → **Open** → select the `.gexf` file")
+        st.markdown("3. In the **Layout** panel, run `ForceAtlas 2` or `Fruchterman Reingold`")
+        st.markdown("4. In the **Appearance** panel, adjust node size/color by weight attribute")
+
     if vos_data["items"]:
         st.subheader(t("top_nodes"))
         key = list(vos_data["items"][0]["weights"].keys())[0]
-        for i, a in enumerate(sorted(vos_data["items"], key=lambda x: x["weights"].get(key, 0), reverse=True)[:20], 1):
-            st.write(str(i) + ". " + a["label"] + " — " + str(round(a["weights"].get(key, 0), 3)))
-            if a.get("description"):
-                st.caption(a["description"])
+        sorted_items = sorted(vos_data["items"], key=lambda x: x["weights"].get(key, 0), reverse=True)[:20]
+
+        ana = st.session_state.get("last_analysis_type", "")
+        works_cache = st.session_state.get("works_cache", [])
+        work_keywords = st.session_state.get("work_keywords", {})
+
+        # ノードボタン一覧
+        kw_analysis_types = ["Keyword Co-occurrence（KeyBERT）", "Keyword Co-occurrence (KeyBERT)"]
+        coauth_types = ["Co-authorship"]
+        is_kw_mode = ana in kw_analysis_types
+        is_coauth_mode = ana in coauth_types
+
+        for i, a in enumerate(sorted_items, 1):
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                weight_val = round(a["weights"].get(key, 0), 3)
+                label_str = str(i) + ". " + a["label"] + "  (" + str(weight_val) + ")"
+                if a.get("description"):
+                    label_str += "  — " + a["description"]
+                if st.button(label_str, key="node_btn_" + str(i), use_container_width=True):
+                    st.session_state["selected_node"] = a["label"]
+                    st.session_state["selected_node_id"] = a.get("id", a["label"])
+
+        # 選択ノードの関連論文表示
+        selected_node = st.session_state.get("selected_node")
+        if selected_node and works_cache:
+            st.markdown("---")
+            if is_kw_mode:
+                st.markdown("### 🔍 **「" + selected_node + "」** を含む論文")
+                matched = [
+                    w for w in works_cache
+                    if selected_node in work_keywords.get(w.get("id", ""), [])
+                ]
+            elif is_coauth_mode:
+                st.markdown("### 👤 **「" + selected_node + "」** の論文")
+                matched = [
+                    w for w in works_cache
+                    if any(
+                        a.get("author", {}).get("display_name", "") == selected_node
+                        for a in w.get("authorships", [])
+                    )
+                ]
+            else:
+                matched = []
+
+            if matched:
+                st.caption(str(len(matched)) + ("件の論文" if lang=="ja" else " papers found"))
+                for w in matched[:30]:
+                    title = w.get("title", "No title") or "No title"
+                    year = str(w.get("publication_year", ""))
+                    doi = w.get("doi", "") or ""
+                    authors = w.get("authorships", [])
+                    author_names_list = [a.get("author", {}).get("display_name", "") for a in authors[:3]]
+                    author_str = ", ".join(filter(None, author_names_list))
+                    if len(authors) > 3:
+                        author_str += " et al."
+                    cited = w.get("cited_by_count", 0)
+
+                    with st.expander("📄 " + title[:80] + ("..." if len(title) > 80 else "")):
+                        st.markdown("**" + title + "**")
+                        if author_str:
+                            st.caption("✍️ " + author_str)
+                        info_parts = []
+                        if year: info_parts.append("📅 " + year)
+                        if cited: info_parts.append("📊 被引用: " + str(cited) if lang=="ja" else "📊 Cited: " + str(cited))
+                        if info_parts:
+                            st.caption("  |  ".join(info_parts))
+                        if doi:
+                            st.markdown("[🔗 DOI](" + doi + ")")
+                        # 抄録
+                        abstract_inv = w.get("abstract_inverted_index", {})
+                        if abstract_inv:
+                            from collections import defaultdict as _dd
+                            pos_word = _dd(str)
+                            word_pos = {}
+                            for word, positions in abstract_inv.items():
+                                for p in positions:
+                                    word_pos[p] = word
+                            abstract_text = " ".join(word_pos[p] for p in sorted(word_pos.keys()))
+                            st.markdown("**Abstract**")
+                            st.write(abstract_text[:600] + ("..." if len(abstract_text) > 600 else ""))
+            elif is_kw_mode or is_coauth_mode:
+                st.info(("該当論文なし" if lang=="ja" else "No papers found") + " — " + selected_node)
+
+            if st.button("✕ " + ("選択解除" if lang=="ja" else "Clear selection"), key="clear_node_sel"):
+                st.session_state["selected_node"] = None
+                st.rerun()
