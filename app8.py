@@ -225,59 +225,80 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
 
 def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     """BERTopicでトピッククラスタリング → ネットワーク化"""
+    import html as _html
     from bertopic import BERTopic
     from sentence_transformers import SentenceTransformer
+    from sklearn.feature_extraction.text import CountVectorizer
 
+    # テキスト準備：HTMLエンティティ除去・空文字除外
     texts, wids = [], []
     for w in works:
-        title = w.get("title","") or ""
+        title    = w.get("title", "") or ""
         abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}))
-        text = (title + " " + abstract).strip()
-        if text:
+        text     = _html.unescape((title + " " + abstract).strip())
+        if len(text) > 20:
             texts.append(text[:512])
-            wids.append(w.get("id",""))
+            wids.append(w.get("id", ""))
 
     if len(texts) < 10:
         return {"items": [], "links": []}, {}, {}
 
-    emb_model = SentenceTransformer(model_key)
-    topic_model = BERTopic(embedding_model=emb_model, nr_topics="auto",
-                           min_topic_size=min_topic_size, calculate_probabilities=False)
+    emb_model  = SentenceTransformer(model_key)
+    vectorizer = CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=2)
+    topic_model = BERTopic(
+        embedding_model=emb_model,
+        vectorizer_model=vectorizer,
+        min_topic_size=min_topic_size,
+        calculate_probabilities=False,
+    )
     topics, _ = topic_model.fit_transform(texts)
 
-    # トピックラベル取得
-    topic_info = topic_model.get_topic_info()
-    topic_labels = {row["Topic"]: row["Name"] for _, row in topic_info.iterrows()}
+    # トピックラベル・件数取得
+    topic_info   = topic_model.get_topic_info()
+    topic_labels = {row["Topic"]: row["Name"]  for _, row in topic_info.iterrows()}
+    topic_counts = {row["Topic"]: row["Count"] for _, row in topic_info.iterrows()}
 
-    # ワーク→トピックのマッピング
-    work_topic = {wid: t for wid, t in zip(wids, topics)}
+    # ワーク→トピックのマッピング（外れ値 -1 は除外）
+    work_topic = {wid: t for wid, t in zip(wids, topics) if t != -1}
 
-    # トピック共起ネットワーク（同著者が複数トピック）
-    topic_count = defaultdict(int)
-    topic_cooccur = defaultdict(int)
+    # ── エッジ：著者ごとに担当トピックを集約してから共起カウント（O(authors)）──
+    author_topics = defaultdict(set)
+    topic_count   = defaultdict(int)
     for w in works:
-        wid = w.get("id","")
-        t = work_topic.get(wid, -1)
-        if t == -1: continue
+        wid = w.get("id", "")
+        t   = work_topic.get(wid, -1)
+        if t == -1:
+            continue
         topic_count[t] += 1
         for a in w.get("authorships", []):
-            aid = a.get("author",{}).get("id","")
-            for w2 in works:
-                wid2 = w2.get("id","")
-                t2 = work_topic.get(wid2, -1)
-                if t2 == -1 or t2 == t: continue
-                for a2 in w2.get("authorships",[]):
-                    if a2.get("author",{}).get("id","") == aid:
-                        pair = (min(t,t2), max(t,t2))
-                        topic_cooccur[pair] += 1
+            aid = a.get("author", {}).get("id", "")
+            if aid:
+                author_topics[aid].add(t)
 
-    link_list = [{"source_id": str(a), "target_id": str(b), "strength": s}
-                 for (a,b),s in topic_cooccur.items() if s >= min_links]
-    connected = {l["source_id"] for l in link_list} | {l["target_id"] for l in link_list}
-    items = [{"id": str(t), "label": topic_labels.get(t, "Topic "+str(t))[:60],
-              "weights": {"Papers": topic_count[t]},
-              "description": "Topic " + str(t)}
-             for t in set(int(x) for x in connected)]
+    topic_cooccur = defaultdict(int)
+    for aid, tset in author_topics.items():
+        tlist = sorted(tset)
+        for i, t1 in enumerate(tlist):
+            for t2 in tlist[i + 1:]:
+                topic_cooccur[(t1, t2)] += 1
+
+    valid_topics = {t for t in topic_count if t != -1}
+    link_list = [
+        {"source_id": str(a), "target_id": str(b), "strength": s}
+        for (a, b), s in topic_cooccur.items()
+        if s >= min_links and a in valid_topics and b in valid_topics
+    ]
+
+    # ── ノード：エッジがなくても全有効トピックを表示 ──
+    items = [
+        {
+            "id":          str(t),
+            "label":       topic_labels.get(t, f"Topic {t}")[:60],
+            "weights":     {"Papers": topic_count.get(t, 0)},
+            "description": f"Topic {t}",
+        }
+        for t in sorted(valid_topics)
+    ]
 
     return {"items": items, "links": link_list}, work_topic, topic_labels
 
