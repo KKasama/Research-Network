@@ -223,7 +223,7 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
         })
     return {"items": items, "links": link_list}
 
-def build_bertopic_network(works, model_key, min_links=2):
+def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     """BERTopicでトピッククラスタリング → ネットワーク化"""
     from bertopic import BERTopic
     from sentence_transformers import SentenceTransformer
@@ -241,8 +241,8 @@ def build_bertopic_network(works, model_key, min_links=2):
         return {"items": [], "links": []}, {}, {}
 
     emb_model = SentenceTransformer(model_key)
-    min_topic_size = max(2, len(texts) // 10)
-    topic_model = BERTopic(embedding_model=emb_model, nr_topics="auto", min_topic_size=min_topic_size)
+    topic_model = BERTopic(embedding_model=emb_model, nr_topics="auto",
+                           min_topic_size=min_topic_size, calculate_probabilities=False)
     topics, _ = topic_model.fit_transform(texts)
 
     # トピックラベル取得
@@ -1071,6 +1071,16 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
         else:
             n_clusters = 10
 
+        if tl("BERTopic","BERTopic") in analysis_type:
+            bertopic_min_size = st.slider(
+                tl("最小トピックサイズ（論文数）","Min topic size (papers)"),
+                min_value=3, max_value=50, value=10,
+                help=tl(
+                    "1トピックを形成するのに必要な最低論文数。小さいほど細かいトピックが生まれます。論文数が多い場合は10〜20が目安。",
+                    "Minimum papers required to form one topic. Smaller = more topics. 10–20 is typical for large datasets."
+                )
+            )
+
         min_links = st.slider(tl("最小リンク強度","Min link strength"), 1, 10, 2)
 
         # 可視化方法
@@ -1115,7 +1125,7 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
         elif tl("BERTopic","BERTopic") in analysis_type:
             with st.spinner(tl("BERTopicでクラスタリング中...","Running BERTopic clustering...")):
                 try:
-                    vos_data, cluster_map, cluster_labels_map = build_bertopic_network(works, model_key, min_links)
+                    vos_data, cluster_map, cluster_labels_map = build_bertopic_network(works, model_key, min_links, bertopic_min_size)
                     if not vos_data.get("items"):
                         st.warning(tl("論文数が少なすぎてBERTopicを実行できません（最低10件必要）。",
                                       "Not enough papers to run BERTopic (minimum 10 required)."))
