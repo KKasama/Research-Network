@@ -34,6 +34,13 @@ KEYBERT_MODELS = {
     "MiniLM (general)": ("all-MiniLM-L6-v2",               "🌐 一般（汎用）"),
 }
 
+# BERTopic / K-means は汎用モデルのみ使用（ドメイン特化モデルは不適）
+BERTOPIC_MODELS = {
+    "MiniLM (general / English)":       ("all-MiniLM-L6-v2",                          "🌐 英語・汎用（高速）"),
+    "Multilingual MiniLM (多言語)":     ("paraphrase-multilingual-MiniLM-L12-v2",     "🌍 多言語対応"),
+    "MPNet (general / 高精度)":         ("all-mpnet-base-v2",                          "🎯 英語・高精度（低速）"),
+}
+
 # ────────────────────────────────────────────
 # ユーティリティ
 # ────────────────────────────────────────────
@@ -1076,14 +1083,28 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
             citation_type = "bibliographic_coupling"
 
         # モデル選択（BERT系手法のとき）
-        bert_types = [tl("KeyBERT キーワード共起","KeyBERT Keyword Co-occurrence"),
-                      tl("BERTopic クラスタリング","BERTopic Clustering"),
-                      tl("K-means クラスタリング","K-means Clustering")]
-        if analysis_type in bert_types:
+        keybert_types  = [tl("KeyBERT キーワード共起","KeyBERT Keyword Co-occurrence")]
+        bertopic_types = [tl("BERTopic クラスタリング","BERTopic Clustering"),
+                          tl("K-means クラスタリング","K-means Clustering")]
+
+        if analysis_type in keybert_types:
             st.markdown("🔬 **" + tl("モデル選択","Model") + "**")
             model_name = st.radio("", list(KEYBERT_MODELS.keys()),
                                   format_func=lambda k: k + "  —  " + KEYBERT_MODELS[k][1])
             model_key = KEYBERT_MODELS[model_name][0]
+
+        elif analysis_type in bertopic_types:
+            st.markdown("🔬 **" + tl("モデル選択","Model") + "**")
+            st.caption(tl(
+                "BERTopic / K-means は**汎用モデル**を使用してください。"
+                "ドメイン特化モデル（BatterySciBERT等）はテーマと無関係な語句がラベルになります。",
+                "Use a **general-purpose model** for BERTopic / K-means. "
+                "Domain-specific models (BatterySciBERT etc.) produce unrelated topic labels."
+            ))
+            model_name = st.radio("", list(BERTOPIC_MODELS.keys()),
+                                  format_func=lambda k: k + "  —  " + BERTOPIC_MODELS[k][1])
+            model_key = BERTOPIC_MODELS[model_name][0]
+
         else:
             model_key = None
 
