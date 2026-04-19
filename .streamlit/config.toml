@@ -1,0 +1,8 @@
+[server]
+# site-packages内のtransformers等を監視しようとしてtorchvision未インストールエラーが
+# 大量出力されるのを防ぐため、ファイル監視をポーリング方式に変更
+fileWatcherType = "poll"
+
+[logger]
+# Streamlit内部ログレベルをerrorに設定（watcher警告を抑制）
+level = "error"
