@@ -12,12 +12,31 @@ from collections import defaultdict
 from pathlib import Path
 import datetime
 
-# モデルロード時の冗長ログを抑制
-logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+# ── モデルロード時の冗長ログを抑制 ──
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY",  "error")
+os.environ.setdefault("HF_HUB_VERBOSITY",        "error")
+
+for _lg in ("sentence_transformers", "sentence_transformers.models.Transformer",
+            "transformers", "huggingface_hub", "huggingface_hub.utils",
+            "huggingface_hub.file_download", "filelock"):
+    logging.getLogger(_lg).setLevel(logging.ERROR)
+
 warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=UserWarning)
+
+try:
+    import transformers
+    transformers.logging.set_verbosity_error()
+    transformers.logging.disable_progress_bar()
+except Exception:
+    pass
+
+try:
+    from huggingface_hub import utils as _hf_utils
+    _hf_utils.logging.set_verbosity_error()
+except Exception:
+    pass
 
 st.set_page_config(page_title="Research Network v2", page_icon="🔬", layout="wide")
 
