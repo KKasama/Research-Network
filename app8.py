@@ -895,7 +895,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
 
     fc1, fc2, fc3 = st.columns(3)
     year_from = fc1.number_input("From", 1990, 2026, 2020, key="s1_yf")
-    year_to   = fc2.number_input("To",   1990, 2026, 2025, key="s1_yt")
+    year_to   = fc2.number_input("To",   1990, 2026, 2026, key="s1_yt")
     per_page  = fc3.slider(tl("最大取得件数","Max papers"), 100, 3000, 500, 100, key="s1_pp")
     oa_only   = st.toggle(tl("OAのみ","Open Access only"), key="s1_oa")
 
