@@ -128,6 +128,44 @@ def list_datasets():
     return sorted([p.stem for p in DATA_DIR.glob("*.json")])
 
 # ────────────────────────────────────────────
+# 引用トレンド取得（OpenAlex API）
+# ────────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_citing_works_full(work_id: str, max_papers: int = 200):
+    """
+    指定論文を引用している論文を、書誌結合に必要な referenced_works を含む
+    完全データで取得する（被引用数順・最大 max_papers 件）。
+    """
+    short_id = work_id.rstrip("/").split("/")[-1]
+    fields = ("id,title,publication_year,doi,authorships,"
+              "cited_by_count,referenced_works,topics")
+    results, cursor = [], "*"
+    per_req = min(max_papers, 200)
+    while len(results) < max_papers:
+        params = {
+            "filter":   f"cites:{short_id}",
+            "sort":     "cited_by_count:desc",
+            "per_page": per_req,
+            "cursor":   cursor,
+            "select":   fields,
+            "mailto":   "research@example.com",
+        }
+        try:
+            r = requests.get("https://api.openalex.org/works",
+                             params=params, timeout=20)
+            data  = r.json()
+            batch = data.get("results", [])
+            if not batch:
+                break
+            results.extend(batch)
+            cursor = data.get("meta", {}).get("next_cursor")
+            if not cursor:
+                break
+        except Exception:
+            break
+    return results[:max_papers]
+
+# ────────────────────────────────────────────
 # 中心性計算
 # ────────────────────────────────────────────
 def compute_centrality(vos_data):
@@ -247,13 +285,18 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
     items = []
     for wid in connected:
         w = work_info.get(wid, {})
-        year  = w.get("publication_year","")
+        year  = w.get("publication_year") or ""
         title = (w.get("title","") or wid)[:50]
-        items.append({
+        item = {
             "id":      wid,
             "label":   f"{title} ({year})" if year else title,
             "weights": {"Citations": w.get("cited_by_count", 0)},
-        })
+        }
+        if year:
+            item["scores"] = {"Year": int(year)}  # VOSviewerで年別カラーリング
+        if w.get("doi"):
+            item["url"] = w["doi"]
+        items.append(item)
     return {"items": items, "links": link_list}
 
 def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
@@ -1525,6 +1568,132 @@ function openGephiLite() {{
                     if _ab:
                         st.markdown("**Abstract**")
                         st.write(_ab[:400] + ("..." if len(_ab) > 400 else ""))
+                    # VOSviewer分析ボタン
+                    _wid = _w.get("id", "")
+                    if _wid and st.button(
+                        tl("🔬 引用論文をVOSviewerで分析","🔬 Analyze citing papers in VOSviewer"),
+                        key=f"cite_btn_{rank}"
+                    ):
+                        st.session_state["cite_target"] = {
+                            "id":    _wid,
+                            "title": row[tl("タイトル","Title")],
+                        }
+                        st.rerun()
+
+        # ── 引用論文 VOSviewer分析 ──
+        _cite_target = st.session_state.get("cite_target")
+        if _cite_target and _cite_target.get("id"):
+            st.markdown("---")
+            _ct_title = _cite_target["title"]
+            st.subheader(tl("🔬 引用論文ネットワーク（VOSviewer分析）",
+                            "🔬 Citing Papers Network (VOSviewer Analysis)"))
+            st.markdown(f"**{_ct_title[:90]}{'...' if len(_ct_title)>90 else ''}**")
+            st.caption(tl(
+                "この論文を引用している論文群を書誌結合で分析します。"
+                "年情報付きVOSviewer JSONをダウンロードしてVOSviewerで開いてください。",
+                "Analyzes papers citing this work via bibliographic coupling. "
+                "Download the VOSviewer JSON with year scores and open in VOSviewer."
+            ))
+
+            _col_a, _col_b = st.columns([3, 1])
+            with _col_b:
+                if st.button(tl("✕ 閉じる","✕ Close"), key="close_cite"):
+                    st.session_state["cite_target"] = None
+                    st.rerun()
+
+            _cite_max = _col_a.slider(
+                tl("取得する引用論文数","Max citing papers to fetch"),
+                min_value=50, max_value=500, value=200, step=50,
+                key="cite_max_papers"
+            )
+            _cite_min_links = _col_a.slider(
+                tl("最小共有参考文献数（書誌結合の閾値）","Min shared references (coupling threshold)"),
+                min_value=1, max_value=10, value=2, key="cite_min_links"
+            )
+
+            if st.button(tl("▶ 取得・ネットワーク構築","▶ Fetch & Build Network"),
+                         type="primary", key="run_cite_vos"):
+                with st.spinner(tl(
+                    f"引用論文を取得中（最大{_cite_max}件）...",
+                    f"Fetching citing papers (up to {_cite_max})..."
+                )):
+                    _citing_works = fetch_citing_works_full(
+                        _cite_target["id"], max_papers=_cite_max
+                    )
+                st.session_state["cite_works"] = _citing_works
+
+            _citing_works = st.session_state.get("cite_works", [])
+
+            if _citing_works:
+                # 基本統計
+                _years = [w.get("publication_year") for w in _citing_works
+                          if w.get("publication_year")]
+                _cm1, _cm2, _cm3, _cm4 = st.columns(4)
+                _cm1.metric(tl("引用論文数","Citing papers"), len(_citing_works))
+                _cm2.metric(tl("最古","Earliest"), min(_years) if _years else "—")
+                _cm3.metric(tl("最新","Latest"),   max(_years) if _years else "—")
+                _cm4.metric(tl("年数範囲","Year span"),
+                            f"{max(_years)-min(_years)}年" if len(_years)>1 else "—")
+
+                # 年別分布グラフ
+                import pandas as pd
+                try:
+                    import plotly.express as px
+                    _yr_df = (pd.Series(_years).value_counts()
+                              .sort_index().reset_index())
+                    _yr_df.columns = [tl("年","Year"), tl("論文数","Papers")]
+                    _fig_yr = px.bar(
+                        _yr_df, x=tl("年","Year"), y=tl("論文数","Papers"),
+                        title=tl("引用論文の年別分布","Citing Papers by Year"),
+                        color=tl("論文数","Papers"),
+                        color_continuous_scale="Teal"
+                    )
+                    _fig_yr.update_layout(coloraxis_showscale=False)
+                    st.plotly_chart(_fig_yr, use_container_width=True)
+                except ImportError:
+                    pass
+
+                # 書誌結合ネットワーク構築
+                with st.spinner(tl("書誌結合ネットワークを構築中...","Building bibliographic coupling network...")):
+                    _cite_vos = build_citation_network(
+                        _citing_works,
+                        citation_type="bibliographic_coupling",
+                        min_links=_cite_min_links
+                    )
+
+                _cn_items = _cite_vos.get("items", [])
+                _cn_links = _cite_vos.get("links", [])
+                _ci1, _ci2 = st.columns(2)
+                _ci1.metric(tl("ノード数","Nodes"), len(_cn_items))
+                _ci2.metric(tl("エッジ数","Edges"), len(_cn_links))
+
+                if _cn_items:
+                    st.success(tl(
+                        "✅ ネットワーク構築完了。VOSviewer JSONをダウンロードしてVOSviewerで開いてください。",
+                        "✅ Network built. Download the VOSviewer JSON and open it in VOSviewer."
+                    ))
+                    st.info(tl(
+                        "💡 VOSviewerで **Scores → Year** を選択すると、論文が出版年ごとに色分けされます。",
+                        "💡 In VOSviewer, select **Scores → Year** to color nodes by publication year."
+                    ))
+
+                    # VOSviewer JSON ダウンロード
+                    _vos_json = json.dumps(_cite_vos, ensure_ascii=False, indent=2)
+                    _safe_title = re.sub(r"[^\w]", "_", _ct_title[:30])
+                    st.download_button(
+                        tl("📥 VOSviewer JSON ダウンロード","📥 Download VOSviewer JSON"),
+                        data=_vos_json.encode("utf-8"),
+                        file_name=f"citing_{_safe_title}.json",
+                        mime="application/json",
+                        type="primary"
+                    )
+                else:
+                    st.warning(tl(
+                        f"共有参考文献が{_cite_min_links}件以上の論文ペアがありません。"
+                        "「最小共有参考文献数」を1に下げてみてください。",
+                        f"No paper pairs share ≥{_cite_min_links} references. "
+                        "Try lowering 'Min shared references' to 1."
+                    ))
 
         # CSVダウンロード
         _csv_papers = _papers_df.to_csv(index=True).encode("utf-8-sig")
