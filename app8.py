@@ -1088,21 +1088,27 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                           tl("K-means クラスタリング","K-means Clustering")]
 
         if analysis_type in keybert_types:
-            st.markdown("🔬 **" + tl("モデル選択","Model") + "**")
-            model_name = st.radio("", list(KEYBERT_MODELS.keys()),
-                                  format_func=lambda k: k + "  —  " + KEYBERT_MODELS[k][1])
+            model_name = st.radio(
+                tl("🔬 モデル選択","🔬 Model"),
+                list(KEYBERT_MODELS.keys()),
+                format_func=lambda k: k + "  —  " + KEYBERT_MODELS[k][1],
+                key="keybert_model_radio",
+            )
             model_key = KEYBERT_MODELS[model_name][0]
 
         elif analysis_type in bertopic_types:
-            st.markdown("🔬 **" + tl("モデル選択","Model") + "**")
             st.caption(tl(
-                "BERTopic / K-means は**汎用モデル**を使用してください。"
+                "⚠️ BERTopic / K-means は**汎用モデル**を使用してください。"
                 "ドメイン特化モデル（BatterySciBERT等）はテーマと無関係な語句がラベルになります。",
-                "Use a **general-purpose model** for BERTopic / K-means. "
+                "⚠️ Use a **general-purpose model** for BERTopic / K-means. "
                 "Domain-specific models (BatterySciBERT etc.) produce unrelated topic labels."
             ))
-            model_name = st.radio("", list(BERTOPIC_MODELS.keys()),
-                                  format_func=lambda k: k + "  —  " + BERTOPIC_MODELS[k][1])
+            model_name = st.radio(
+                tl("🔬 モデル選択","🔬 Model"),
+                list(BERTOPIC_MODELS.keys()),
+                format_func=lambda k: k + "  —  " + BERTOPIC_MODELS[k][1],
+                key="bertopic_model_radio",
+            )
             model_key = BERTOPIC_MODELS[model_name][0]
 
         else:
