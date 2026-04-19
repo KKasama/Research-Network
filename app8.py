@@ -7,10 +7,17 @@ Research Network Portal v2
 """
 
 import streamlit as st
-import json, requests, os, re
+import json, requests, os, re, logging, warnings
 from collections import defaultdict
 from pathlib import Path
 import datetime
+
+# モデルロード時の冗長ログを抑制
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 st.set_page_config(page_title="Research Network v2", page_icon="🔬", layout="wide")
 
