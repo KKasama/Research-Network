@@ -1121,6 +1121,16 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                 key="keybert_model_radio",
             )
             model_key = KEYBERT_MODELS[model_name][0]
+            keybert_max_papers = st.slider(
+                tl("最大処理件数（被引用数順）","Max papers (by citations)"),
+                min_value=100, max_value=min(len(works), 2000),
+                value=min(500, len(works)), step=100,
+                key="keybert_max_papers",
+                help=tl(
+                    "被引用数の多い論文を優先処理。件数を減らすと処理が速くなります。",
+                    "Prioritizes most-cited papers. Reduce for faster processing."
+                )
+            )
 
         elif analysis_type in bertopic_types:
             st.caption(tl(
@@ -1139,6 +1149,9 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
 
         else:
             model_key = None
+
+        if analysis_type not in keybert_types:
+            keybert_max_papers = 500
 
         if tl("K-means","K-means") in analysis_type:
             n_clusters = st.slider(tl("クラスター数","Number of clusters"), 3, 30, 10)
@@ -1181,16 +1194,43 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
 
         elif tl("KeyBERT","KeyBERT") in analysis_type:
             from keybert import KeyBERT
-            with st.spinner(tl("KeyBERT でキーワード抽出中...","Extracting keywords with KeyBERT...") + f" ({model_name})"):
-                kw_model = KeyBERT(model=model_key)
-                for w in works:
-                    wid = w.get("id","")
-                    title = w.get("title","") or ""
-                    abstract = reconstruct_abstract(w.get("abstract_inverted_index",{}))
-                    text = (title + " " + abstract)[:1000]
-                    if text.strip():
-                        kws = kw_model.extract_keywords(text, keyphrase_ngram_range=(1,2), top_n=5)
-                        work_keywords[wid] = [k for k,_ in kws]
+            import html as _html
+
+            _kw_cache_key = f"kw_{selected_ds}_{model_key}_{keybert_max_papers}"
+
+            if _kw_cache_key in st.session_state:
+                # ── キャッシュヒット：即座に読み込み ──
+                work_keywords = st.session_state[_kw_cache_key]
+                st.success(tl(
+                    f"✅ キャッシュから読み込みました（{len(work_keywords)}件）",
+                    f"✅ Loaded from cache ({len(work_keywords)} papers)"
+                ))
+            else:
+                # ── 被引用数順に上位N件を選択 ──
+                _sorted = sorted(works, key=lambda w: w.get("cited_by_count", 0), reverse=True)
+                _target = _sorted[:keybert_max_papers]
+                _wids, _texts = [], []
+                for w in _target:
+                    wid = w.get("id", "")
+                    title = w.get("title", "") or ""
+                    abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}))
+                    text = _html.unescape((title + " " + abstract).strip())[:1000]
+                    if text:
+                        _wids.append(wid)
+                        _texts.append(text)
+
+                with st.spinner(tl(
+                    f"KeyBERT でキーワード抽出中... {len(_texts)}件 [{model_name}]（バッチ処理）",
+                    f"Extracting keywords... {len(_texts)} papers [{model_name}] (batch)"
+                )):
+                    kw_model = KeyBERT(model=model_key)
+                    _all_kws = kw_model.extract_keywords(
+                        _texts, keyphrase_ngram_range=(1, 2), top_n=5
+                    )
+
+                work_keywords = {wid: [k for k, _ in kws]
+                                 for wid, kws in zip(_wids, _all_kws)}
+                st.session_state[_kw_cache_key] = work_keywords
             with st.spinner(tl("ネットワーク構築中...","Building network...")):
                 vos_data = largest_connected_component(build_keyword_cooccurrence(works, work_keywords, min_links))
             st.success(tl(f"キーワード抽出完了: {sum(len(v) for v in work_keywords.values())}語 [{model_name}]",
