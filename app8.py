@@ -54,10 +54,9 @@ def tl(ja, en):
 
 # ── KeyBERTモデル定義 ──
 KEYBERT_MODELS = {
-    "BatterySciBERT": ("batterydata/batteryscibert-cased",  "🔋 バッテリー・電気化学系"),
-    "MatSciBERT":     ("m3rg-iitd/matscibert",              "⚗️ 材料科学系"),
-    "BioBERT":        ("dmis-lab/biobert-base-cased-v1.2",  "🧬 生命科学・医療系"),
-    "MiniLM (general)": ("all-MiniLM-L6-v2",               "🌐 一般（汎用）"),
+    "BioBERT":                  ("dmis-lab/biobert-base-cased-v1.2",          "🧬 生命科学・医療・心理・福祉系"),
+    "MiniLM (English)":         ("all-MiniLM-L6-v2",                          "🌐 英語・一般（汎用・高速）"),
+    "Multilingual MiniLM (多言語)": ("paraphrase-multilingual-MiniLM-L12-v2", "🌍 多言語・日本語対応"),
 }
 
 # BERTopic / K-means は汎用モデルのみ使用（ドメイン特化モデルは不適）
