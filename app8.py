@@ -1456,6 +1456,85 @@ function openGephiLite() {{
                 use_container_width=True, hide_index=True
             )
 
+        # ── 重要論文ランキング（被引用数） ──
+        st.markdown("---")
+        st.subheader(tl("📄 重要論文ランキング（被引用数順）",
+                        "📄 Key Papers Ranking (by citation count)"))
+        st.caption(tl(
+            "ネットワーク分析に依存せず、データセット内の論文を**被引用数**で直接ランキングします。"
+            "論文数が少ない場合でも信頼性の高い重要度指標です。",
+            "Ranks papers directly by **citation count**, independent of network analysis. "
+            "A reliable importance measure even with smaller datasets."
+        ))
+
+        import pandas as pd
+        _top_n_papers = st.slider(
+            tl("表示件数","Top N papers"), 5, 100, 20, key="top_papers_n"
+        )
+        _paper_rows = []
+        for w in works:
+            title  = w.get("title","") or "No title"
+            year   = w.get("publication_year","")
+            cited  = w.get("cited_by_count", 0) or 0
+            doi    = w.get("doi","") or ""
+            auths  = [a.get("author",{}).get("display_name","")
+                      for a in w.get("authorships",[])[:3]]
+            topics = [t.get("display_name","") for t in w.get("topics",[])[:2]]
+            _paper_rows.append({
+                tl("被引用数","Cited"):   cited,
+                tl("タイトル","Title"):   title,
+                tl("著者","Authors"):     "; ".join(filter(None, auths)),
+                tl("年","Year"):          year,
+                tl("トピック","Topics"):  "; ".join(topics),
+                "DOI":                    doi,
+            })
+
+        _papers_df = (
+            pd.DataFrame(_paper_rows)
+            .sort_values(tl("被引用数","Cited"), ascending=False)
+            .reset_index(drop=True)
+        )
+        _papers_df.index = _papers_df.index + 1  # 1始まり
+
+        # 上位N件をテーブル表示
+        st.dataframe(
+            _papers_df.head(_top_n_papers).drop(columns=["DOI"]),
+            use_container_width=True
+        )
+
+        # 詳細エキスパンダー
+        for rank, row in _papers_df.head(_top_n_papers).iterrows():
+            _cited_label = tl(f"📊 被引用: {row[tl('被引用数','Cited')]}",
+                              f"📊 Cited: {row[tl('被引用数','Cited')]}")
+            with st.expander(
+                f"{rank}. {row[tl('タイトル','Title')][:70]}"
+                f"{'...' if len(row[tl('タイトル','Title')])>70 else ''}  "
+                f"({row[tl('年','Year')]})  {_cited_label}"
+            ):
+                st.markdown(f"**{row[tl('タイトル','Title')]}**")
+                if row[tl("著者","Authors")]:
+                    st.caption("✍️ " + row[tl("著者","Authors")])
+                if row[tl("トピック","Topics")]:
+                    st.caption("🏷️ " + row[tl("トピック","Topics")])
+                if row["DOI"]:
+                    st.markdown(f"[🔗 DOI リンク]({row['DOI']})")
+                # アブストラクト
+                _w = next((w for w in works if w.get("title","") == row[tl("タイトル","Title")]), None)
+                if _w:
+                    _ab = reconstruct_abstract(_w.get("abstract_inverted_index", {}))
+                    if _ab:
+                        st.markdown("**Abstract**")
+                        st.write(_ab[:400] + ("..." if len(_ab) > 400 else ""))
+
+        # CSVダウンロード
+        _csv_papers = _papers_df.to_csv(index=True).encode("utf-8-sig")
+        st.download_button(
+            tl("📥 CSVダウンロード（全件）","📥 Download CSV (all papers)"),
+            data=_csv_papers,
+            file_name="key_papers.csv",
+            mime="text/csv"
+        )
+
         # ── 上位ノード & 論文逆引き ──
         st.markdown("---")
         if items:
