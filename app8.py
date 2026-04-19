@@ -800,15 +800,70 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                 st.rerun()
 
     with tab_inst:
+        # ── A: ROR IDで直接指定（最も確実） ──
+        st.markdown(tl("**🔑 ROR IDで直接指定（推奨・最も確実）**",
+                       "**🔑 Enter ROR ID directly (recommended)**"))
+        st.caption(tl(
+            "ROR URLまたはROR番号を入力してください。"
+            "　例: `https://ror.org/006yn3y28`　または　`006yn3y28`",
+            "Enter ROR URL or ROR number.  "
+            "e.g. `https://ror.org/006yn3y28` or `006yn3y28`"
+        ))
+        _ror_input_col, _ror_btn_col = st.columns([4, 1])
+        _ror_raw = _ror_input_col.text_input(
+            tl("ROR URL / ROR番号","ROR URL / ROR number"),
+            key="s1_ror_direct",
+            placeholder="https://ror.org/006yn3y28  または  006yn3y28",
+            label_visibility="collapsed"
+        )
+        _ror_confirm = _ror_btn_col.button(
+            tl("確定","Confirm"), key="s1_ror_confirm_btn", use_container_width=True
+        )
+
+        if _ror_confirm and _ror_raw.strip():
+            # URL・番号どちらでも正規化
+            _ror_clean = _ror_raw.strip().rstrip("/")
+            if "ror.org/" in _ror_clean:
+                _ror_id = _ror_clean.split("ror.org/")[-1]
+            else:
+                _ror_id = _ror_clean
+            _ror_full = f"https://ror.org/{_ror_id}"
+
+            with st.spinner(tl("RORで機関情報を取得中...","Fetching institution by ROR...")):
+                try:
+                    _r = requests.get(
+                        f"https://api.openalex.org/institutions/{_ror_full}",
+                        params={"mailto": "research@example.com"}, timeout=10
+                    )
+                    _inst_data = _r.json()
+                    _inst_name = _inst_data.get("display_name", "")
+                    if _inst_name:
+                        st.session_state.s1_org_ror_id = _ror_full
+                        st.session_state.s1_org_name   = _inst_name
+                        st.session_state.s1_search_results = []
+                        st.rerun()
+                    else:
+                        st.error(tl(
+                            f"ROR ID `{_ror_id}` が見つかりませんでした。番号を確認してください。",
+                            f"ROR ID `{_ror_id}` not found. Please check the number."
+                        ))
+                except Exception as e:
+                    st.error(f"API error: {e}")
+
+        st.markdown(tl("---  または 機関名で検索  ---","---  or search by name  ---"))
+
+        # ── B: 機関名テキスト検索 ──
         s_inst_q = st.text_input(tl("機関名","Institution name"), key="s1_iq",
-                                 placeholder=tl("例: University of Tokyo","e.g. University of Tokyo"))
+                                 placeholder=tl("例: National Institute for Materials Science",
+                                               "e.g. National Institute for Materials Science"))
         if st.button(tl("機関を検索","Search institution"), key="s1_ibtn") and s_inst_q:
             with st.spinner(tl("機関を検索中...","Searching institutions...")):
                 res, _, _ = search_openalex(s_inst_q, "Affiliation Name")
                 st.session_state.s1_search_results = res
                 st.session_state.s1_search_result_type = "institutions"
         if st.session_state.s1_search_result_type == "institutions" and st.session_state.s1_search_results:
-            st.markdown(tl("**候補から選択してください**","**Select from results**"))
+            st.markdown(tl("**候補から選択（ROR IDを確認してください）**",
+                           "**Select from results (check ROR ID)**"))
             for inst in st.session_state.s1_search_results:
                 iid     = inst.get("id","")
                 name    = inst.get("display_name","")
@@ -822,8 +877,11 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                     st.session_state.s1_org_name   = name
                     st.session_state.s1_search_results = []
                     st.rerun()
+
+        # ── 選択中の機関 ──
         if st.session_state.s1_org_ror_id:
-            st.success("✅ " + st.session_state.s1_org_name)
+            _ror_disp = st.session_state.s1_org_ror_id.replace("https://ror.org/","")
+            st.success(f"✅ {st.session_state.s1_org_name}　[ROR: {_ror_disp}]")
             if st.button(tl("クリア","Clear"), key="s1_ci"):
                 st.session_state.s1_org_ror_id = None
                 st.session_state.s1_org_name   = ""
