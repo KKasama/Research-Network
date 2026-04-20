@@ -1235,16 +1235,20 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                 key="keybert_model_radio",
             )
             model_key = KEYBERT_MODELS[model_name][0]
-            keybert_max_papers = st.slider(
-                tl("最大処理件数（被引用数順）","Max papers (by citations)"),
-                min_value=100, max_value=min(len(works), 2000),
-                value=min(500, len(works)), step=100,
-                key="keybert_max_papers",
-                help=tl(
-                    "被引用数の多い論文を優先処理。件数を減らすと処理が速くなります。",
-                    "Prioritizes most-cited papers. Reduce for faster processing."
+            if len(works) > 100:
+                keybert_max_papers = st.slider(
+                    tl("最大処理件数（被引用数順）","Max papers (by citations)"),
+                    min_value=100, max_value=min(len(works), 2000),
+                    value=min(500, len(works)), step=100,
+                    key="keybert_max_papers",
+                    help=tl(
+                        "被引用数の多い論文を優先処理。件数を減らすと処理が速くなります。",
+                        "Prioritizes most-cited papers. Reduce for faster processing."
+                    )
                 )
-            )
+            else:
+                keybert_max_papers = len(works)
+                st.caption(tl(f"全 {len(works)} 件を処理します", f"Processing all {len(works)} papers"))
 
         elif analysis_type in bertopic_types:
             st.caption(tl(
