@@ -107,7 +107,7 @@ def doi_citation_links(doi: str) -> str:
     return (
         f"[🔗 DOI]({doi})  |  "
         f"[📊 Connected Papers](https://www.connectedpapers.com/search?q={enc})  |  "
-        f"[🔬 Semantic Scholar](https://www.semanticscholar.org/search?q={enc}&sort=Relevance)"
+        f"[🔍 Google Scholar](https://scholar.google.com/scholar?q={enc})"
     )
 
 def reconstruct_abstract(inv_index):
