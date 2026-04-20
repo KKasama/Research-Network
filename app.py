@@ -292,14 +292,18 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
 
     connected = {l["source_id"] for l in link_list} | {l["target_id"] for l in link_list}
     doi_to_work = {to_node_id(w.get("id","")): w for w in works}
+
+    # VOSviewerはid=整数必須のため、DOI文字列→整数にマッピング
+    doi_to_int = {nid: idx for idx, nid in enumerate(sorted(connected), 1)}
+
     items = []
-    for nid in connected:
+    for nid, int_id in doi_to_int.items():
         w = doi_to_work.get(nid, {})
-        year  = w.get("publication_year") or ""
-        title = (w.get("title","") or nid)[:50]
+        year    = w.get("publication_year") or ""
+        title   = (w.get("title","") or nid)[:50]
         doi_url = w.get("doi", "") or ""
         item = {
-            "id":      nid,
+            "id":      int_id,
             "label":   f"{title} ({year})" if year else title,
             "weights": {"Citations": w.get("cited_by_count", 0)},
         }
@@ -308,7 +312,15 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
         if doi_url:
             item["url"] = doi_url
         items.append(item)
-    return {"items": items, "links": link_list}
+
+    link_list_int = [
+        {"source_id": doi_to_int[l["source_id"]],
+         "target_id": doi_to_int[l["target_id"]],
+         "strength":  l["strength"]}
+        for l in link_list
+        if l["source_id"] in doi_to_int and l["target_id"] in doi_to_int
+    ]
+    return {"items": items, "links": link_list_int}
 
 def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     """BERTopicでトピッククラスタリング → ネットワーク化"""
@@ -1492,7 +1504,7 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                     "💡 VOSviewerで **Scores → Year** を選択すると、論文が出版年ごとに色分けされます。",
                     "💡 In VOSviewer, select **Scores → Year** to color nodes by publication year."
                 ))
-                _vos_json = json.dumps(_cite_vos, ensure_ascii=False, indent=2)
+                _vos_json = json.dumps({"network": _cite_vos}, ensure_ascii=False, indent=2)
                 _safe_title = re.sub(r"[^\w]", "_", _ct_title[:30])
                 st.download_button(
                     tl("📥 VOSviewer JSON ダウンロード","📥 Download VOSviewer JSON"),
@@ -1765,7 +1777,7 @@ function openGephiLite() {{
                                 if _cw:
                                     _vos = build_citation_network(_cw, citation_type="bibliographic_coupling", min_links=1)
                                     st.session_state[_cite_key] = {
-                                        "json":    json.dumps(_vos, ensure_ascii=False, indent=2),
+                                        "json":    json.dumps({"network": _vos}, ensure_ascii=False, indent=2),
                                         "title":   row[tl("タイトル","Title")],
                                         "n_items": len(_vos.get("items", [])),
                                         "n_links": len(_vos.get("links", [])),
@@ -1863,7 +1875,7 @@ function openGephiLite() {{
                                     if _cw2:
                                         _vos2 = build_citation_network(_cw2, citation_type="bibliographic_coupling", min_links=1)
                                         st.session_state[_cite_key2] = {
-                                            "json":    json.dumps(_vos2, ensure_ascii=False, indent=2),
+                                            "json":    json.dumps({"network": _vos2}, ensure_ascii=False, indent=2),
                                             "title":   title,
                                             "n_items": len(_vos2.get("items", [])),
                                             "n_links": len(_vos2.get("links", [])),
