@@ -97,18 +97,6 @@ def fetch_works(filters, per_page=500):
             break
     return works[:per_page]
 
-def doi_citation_links(doi: str) -> str:
-    """DOI URLから引用関係リンク群を生成（Markdown形式）"""
-    if not doi:
-        return ""
-    doi_id = doi.replace("https://doi.org/", "").replace("http://doi.org/", "").strip("/")
-    from urllib.parse import quote
-    enc = quote(doi_id, safe="")
-    return (
-        f"[🔗 DOI]({doi})  |  "
-        f"[📊 Connected Papers](https://www.connectedpapers.com/search?q={enc})  |  "
-        f"[🔍 Google Scholar](https://scholar.google.com/scholar?q={enc})"
-    )
 
 def reconstruct_abstract(inv_index):
     if not inv_index: return ""
@@ -269,10 +257,16 @@ def build_keyword_cooccurrence(works, work_keywords, min_links=2):
     return {"items": items, "links": link_list}
 
 def build_citation_network(works, citation_type="bibliographic_coupling", min_links=1):
-    """書誌結合 or 直接引用ネットワークを構築"""
+    """書誌結合 or 直接引用ネットワークを構築（ノードIDはDOI優先）"""
     from collections import defaultdict
     work_info = {w.get("id",""): w for w in works}
     work_ids  = set(work_info.keys())
+
+    def to_node_id(wid):
+        """OpenAlex IDをDOI IDに変換（なければOpenAlex IDを使用）"""
+        w = work_info.get(wid, {})
+        doi = (w.get("doi", "") or "").replace("https://doi.org/", "").replace("http://doi.org/", "").strip("/")
+        return doi if doi else wid
 
     if citation_type == "bibliographic_coupling":
         refs = {w.get("id",""): set(w.get("referenced_works",[])) for w in works}
@@ -283,32 +277,36 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
                 shared = len(refs[wlist[i]] & refs[wlist[j]])
                 if shared >= min_links:
                     links[(wlist[i], wlist[j])] = shared
-        link_list = [{"source_id": a, "target_id": b, "strength": s}
+        link_list = [{"source_id": to_node_id(a), "target_id": to_node_id(b), "strength": s}
                      for (a,b), s in links.items()]
     else:  # direct_citation
         seen, link_list = set(), []
         for w in works:
             wid = w.get("id","")
             for ref in w.get("referenced_works",[]):
-                if ref in work_ids and ref != wid and (wid, ref) not in seen:
-                    seen.add((wid, ref))
-                    link_list.append({"source_id": wid, "target_id": ref, "strength": 1})
+                if ref in work_ids and ref != wid:
+                    src, tgt = to_node_id(wid), to_node_id(ref)
+                    if (src, tgt) not in seen:
+                        seen.add((src, tgt))
+                        link_list.append({"source_id": src, "target_id": tgt, "strength": 1})
 
     connected = {l["source_id"] for l in link_list} | {l["target_id"] for l in link_list}
+    doi_to_work = {to_node_id(w.get("id","")): w for w in works}
     items = []
-    for wid in connected:
-        w = work_info.get(wid, {})
+    for nid in connected:
+        w = doi_to_work.get(nid, {})
         year  = w.get("publication_year") or ""
-        title = (w.get("title","") or wid)[:50]
+        title = (w.get("title","") or nid)[:50]
+        doi_url = w.get("doi", "") or ""
         item = {
-            "id":      wid,
+            "id":      nid,
             "label":   f"{title} ({year})" if year else title,
             "weights": {"Citations": w.get("cited_by_count", 0)},
         }
         if year:
-            item["scores"] = {"Year": int(year)}  # VOSviewerで年別カラーリング
-        if w.get("doi"):
-            item["url"] = w["doi"]
+            item["scores"] = {"Year": int(year)}
+        if doi_url:
+            item["url"] = doi_url
         items.append(item)
     return {"items": items, "links": link_list}
 
@@ -1075,7 +1073,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                     authors = [a.get("author",{}).get("display_name","") for a in w.get("authorships",[])[:2]]
                     st.markdown(f"**{title[:80]}**")
                     st.caption(year + "  |  " + ", ".join(filter(None,authors)) +
-                               ("  |  " + doi_citation_links(doi) if doi else ""))
+                               (f"  |  [DOI]({doi})" if doi else ""))
                     st.markdown("---")
             else:
                 st.warning(tl("該当なし","No results found"))
@@ -1746,7 +1744,7 @@ function openGephiLite() {{
                 if row[tl("トピック","Topics")]:
                     st.caption("🏷️ " + row[tl("トピック","Topics")])
                 if row["DOI"]:
-                    st.markdown(doi_citation_links(row["DOI"]))
+                    st.markdown(f"[🔗 DOI]({row['DOI']})")
                 # アブストラクト
                 _w = next((w for w in works if w.get("title","") == row[tl("タイトル","Title")]), None)
                 if _w:
@@ -1754,10 +1752,9 @@ function openGephiLite() {{
                     if _ab:
                         st.markdown("**Abstract**")
                         st.write(_ab[:400] + ("..." if len(_ab) > 400 else ""))
-                    # VOSviewer分析ボタン
                     _wid = _w.get("id", "")
                     if _wid and st.button(
-                        tl("🔬 引用論文をVOSviewerで分析","🔬 Analyze citing papers in VOSviewer"),
+                        tl("📊 DOI引用ネットワーク生成","📊 Build DOI Citation Network"),
                         key=f"cite_btn_{rank}"
                     ):
                         st.session_state["cite_target"] = {
@@ -1765,8 +1762,8 @@ function openGephiLite() {{
                             "title": row[tl("タイトル","Title")],
                         }
                         st.session_state["cite_works"] = []
-                        st.toast(tl("↑ ページ上部に引用分析セクションが表示されます",
-                                    "↑ Citation analysis section shown at top of page"), icon="🔬")
+                        st.toast(tl("↑ ページ上部でDOI引用ネットワークを構築します",
+                                    "↑ Building DOI citation network at top of page"), icon="📊")
                         st.rerun()
 
         # CSVダウンロード
@@ -1827,11 +1824,22 @@ function openGephiLite() {{
                         if year:  parts.append("📅 " + year)
                         if cited: parts.append(tl(f"📊 被引用: {cited}", f"📊 Cited: {cited}"))
                         if parts: st.caption("  |  ".join(parts))
-                        if doi:   st.markdown(doi_citation_links(doi))
+                        if doi:   st.markdown(f"[🔗 DOI]({doi})")
                         ab = reconstruct_abstract(w.get("abstract_inverted_index",{}))
                         if ab:
                             st.markdown("**Abstract**")
                             st.write(ab[:500] + ("..." if len(ab)>500 else ""))
+                        _wid2 = w.get("id", "")
+                        if _wid2:
+                            if st.button(
+                                tl("📊 DOI引用ネットワーク生成","📊 Build DOI Citation Network"),
+                                key=f"cite_nd_{_wid2}"
+                            ):
+                                st.session_state["cite_target"] = {"id": _wid2, "title": title}
+                                st.session_state["cite_works"] = []
+                                st.toast(tl("↑ ページ上部でDOI引用ネットワークを構築します",
+                                            "↑ Building DOI citation network at top of page"), icon="📊")
+                                st.rerun()
 
                 if st.button(tl("✕ 選択解除","✕ Clear"), key="clr_nd"):
                     st.session_state["sel_node"] = None
