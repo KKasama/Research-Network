@@ -1754,18 +1754,39 @@ function openGephiLite() {{
                         st.markdown("**Abstract**")
                         st.write(_ab[:400] + ("..." if len(_ab) > 400 else ""))
                     _wid = _w.get("id", "")
-                    if _wid and st.button(
-                        tl("📊 DOI引用ネットワーク生成","📊 Build DOI Citation Network"),
-                        key=f"cite_btn_{rank}"
-                    ):
-                        st.session_state["cite_target"] = {
-                            "id":    _wid,
-                            "title": row[tl("タイトル","Title")],
-                        }
-                        st.session_state["cite_works"] = []
-                        st.toast(tl("↑ ページ上部でDOI引用ネットワークを構築します",
-                                    "↑ Building DOI citation network at top of page"), icon="📊")
-                        st.rerun()
+                    if _wid:
+                        _cite_key = f"doi_net_{_wid}"
+                        if st.button(
+                            tl("📊 DOI引用ネットワーク生成","📊 Build DOI Citation Network"),
+                            key=f"cite_btn_{rank}"
+                        ):
+                            with st.spinner(tl("引用論文を取得・ネットワーク構築中...","Fetching & building DOI citation network...")):
+                                _cw = fetch_citing_works_full(_wid, max_papers=200)
+                                if _cw:
+                                    _vos = build_citation_network(_cw, citation_type="bibliographic_coupling", min_links=1)
+                                    st.session_state[_cite_key] = {
+                                        "json":    json.dumps(_vos, ensure_ascii=False, indent=2),
+                                        "title":   row[tl("タイトル","Title")],
+                                        "n_items": len(_vos.get("items", [])),
+                                        "n_links": len(_vos.get("links", [])),
+                                    }
+                                else:
+                                    st.session_state[_cite_key] = {"json": None}
+                        _net = st.session_state.get(_cite_key)
+                        if _net:
+                            if _net.get("json"):
+                                st.success(tl(f"✅ ノード(DOI): {_net['n_items']}件 / エッジ: {_net['n_links']}件",
+                                              f"✅ Nodes(DOI): {_net['n_items']} / Edges: {_net['n_links']}"))
+                                _safe_t = re.sub(r"[^\w]", "_", _net["title"][:30])
+                                st.download_button(
+                                    tl("📥 DOI引用ネットワーク JSON ダウンロード","📥 Download DOI Citation Network JSON"),
+                                    data=_net["json"].encode("utf-8"),
+                                    file_name=f"doi_cite_{_safe_t}.json",
+                                    mime="application/json",
+                                    key=f"dl_cite_{rank}"
+                                )
+                            else:
+                                st.info(tl("引用論文が見つかりませんでした。","No citing papers found."))
 
         # CSVダウンロード
         _csv_papers = _papers_df.to_csv(index=True).encode("utf-8-sig")
@@ -1832,15 +1853,38 @@ function openGephiLite() {{
                             st.write(ab[:500] + ("..." if len(ab)>500 else ""))
                         _wid2 = w.get("id", "")
                         if _wid2:
+                            _cite_key2 = f"doi_net_{_wid2}"
                             if st.button(
                                 tl("📊 DOI引用ネットワーク生成","📊 Build DOI Citation Network"),
                                 key=f"cite_nd_{_wid2}"
                             ):
-                                st.session_state["cite_target"] = {"id": _wid2, "title": title}
-                                st.session_state["cite_works"] = []
-                                st.toast(tl("↑ ページ上部でDOI引用ネットワークを構築します",
-                                            "↑ Building DOI citation network at top of page"), icon="📊")
-                                st.rerun()
+                                with st.spinner(tl("引用論文を取得・ネットワーク構築中...","Fetching & building DOI citation network...")):
+                                    _cw2 = fetch_citing_works_full(_wid2, max_papers=200)
+                                    if _cw2:
+                                        _vos2 = build_citation_network(_cw2, citation_type="bibliographic_coupling", min_links=1)
+                                        st.session_state[_cite_key2] = {
+                                            "json":    json.dumps(_vos2, ensure_ascii=False, indent=2),
+                                            "title":   title,
+                                            "n_items": len(_vos2.get("items", [])),
+                                            "n_links": len(_vos2.get("links", [])),
+                                        }
+                                    else:
+                                        st.session_state[_cite_key2] = {"json": None}
+                            _net2 = st.session_state.get(_cite_key2)
+                            if _net2:
+                                if _net2.get("json"):
+                                    st.success(tl(f"✅ ノード(DOI): {_net2['n_items']}件 / エッジ: {_net2['n_links']}件",
+                                                  f"✅ Nodes(DOI): {_net2['n_items']} / Edges: {_net2['n_links']}"))
+                                    _safe_t2 = re.sub(r"[^\w]", "_", _net2["title"][:30])
+                                    st.download_button(
+                                        tl("📥 DOI引用ネットワーク JSON ダウンロード","📥 Download DOI Citation Network JSON"),
+                                        data=_net2["json"].encode("utf-8"),
+                                        file_name=f"doi_cite_{_safe_t2}.json",
+                                        mime="application/json",
+                                        key=f"dl_nd_{_wid2}"
+                                    )
+                                else:
+                                    st.info(tl("引用論文が見つかりませんでした。","No citing papers found."))
 
                 if st.button(tl("✕ 選択解除","✕ Clear"), key="clr_nd"):
                     st.session_state["sel_node"] = None
