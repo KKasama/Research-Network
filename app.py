@@ -97,6 +97,19 @@ def fetch_works(filters, per_page=500):
             break
     return works[:per_page]
 
+def doi_citation_links(doi: str) -> str:
+    """DOI URLから引用関係リンク群を生成（Markdown形式）"""
+    if not doi:
+        return ""
+    doi_id = doi.replace("https://doi.org/", "").replace("http://doi.org/", "").strip("/")
+    from urllib.parse import quote
+    enc = quote(doi_id, safe="")
+    return (
+        f"[🔗 DOI]({doi})  |  "
+        f"[📊 Connected Papers](https://www.connectedpapers.com/search?q={enc})  |  "
+        f"[🔬 Semantic Scholar](https://www.semanticscholar.org/search?q={enc}&sort=Relevance)"
+    )
+
 def reconstruct_abstract(inv_index):
     if not inv_index: return ""
     pos_word = {}
@@ -1062,7 +1075,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                     authors = [a.get("author",{}).get("display_name","") for a in w.get("authorships",[])[:2]]
                     st.markdown(f"**{title[:80]}**")
                     st.caption(year + "  |  " + ", ".join(filter(None,authors)) +
-                               ("  |  [DOI](" + doi + ")" if doi else ""))
+                               ("  |  " + doi_citation_links(doi) if doi else ""))
                     st.markdown("---")
             else:
                 st.warning(tl("該当なし","No results found"))
@@ -1729,7 +1742,7 @@ function openGephiLite() {{
                 if row[tl("トピック","Topics")]:
                     st.caption("🏷️ " + row[tl("トピック","Topics")])
                 if row["DOI"]:
-                    st.markdown(f"[🔗 DOI リンク]({row['DOI']})")
+                    st.markdown(doi_citation_links(row["DOI"]))
                 # アブストラクト
                 _w = next((w for w in works if w.get("title","") == row[tl("タイトル","Title")]), None)
                 if _w:
@@ -1810,7 +1823,7 @@ function openGephiLite() {{
                         if year:  parts.append("📅 " + year)
                         if cited: parts.append(tl(f"📊 被引用: {cited}", f"📊 Cited: {cited}"))
                         if parts: st.caption("  |  ".join(parts))
-                        if doi:   st.markdown(f"[🔗 DOI]({doi})")
+                        if doi:   st.markdown(doi_citation_links(doi))
                         ab = reconstruct_abstract(w.get("abstract_inverted_index",{}))
                         if ab:
                             st.markdown("**Abstract**")
