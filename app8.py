@@ -1235,9 +1235,32 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             "Korean": "korean",
         }
 
+        PM_COUNTRIES = [
+            ("Japan",          "🇯🇵 " + tl("日本","Japan")),
+            ("United States",  "🇺🇸 " + tl("米国","United States")),
+            ("China",          "🇨🇳 " + tl("中国","China")),
+            ("United Kingdom", "🇬🇧 " + tl("英国","United Kingdom")),
+            ("Germany",        "🇩🇪 " + tl("ドイツ","Germany")),
+            ("France",         "🇫🇷 " + tl("フランス","France")),
+            ("South Korea",    "🇰🇷 " + tl("韓国","South Korea")),
+            ("Australia",      "🇦🇺 " + tl("オーストラリア","Australia")),
+            ("Canada",         "🇨🇦 " + tl("カナダ","Canada")),
+            ("Italy",          "🇮🇹 " + tl("イタリア","Italy")),
+            ("India",          "🇮🇳 " + tl("インド","India")),
+            ("Brazil",         "🇧🇷 " + tl("ブラジル","Brazil")),
+            ("Spain",          "🇪🇸 " + tl("スペイン","Spain")),
+            ("Netherlands",    "🇳🇱 " + tl("オランダ","Netherlands")),
+            ("Sweden",         "🇸🇪 " + tl("スウェーデン","Sweden")),
+            ("Switzerland",    "🇨🇭 " + tl("スイス","Switzerland")),
+            ("Taiwan",         "🇹🇼 " + tl("台湾","Taiwan")),
+            ("Singapore",      "🇸🇬 " + tl("シンガポール","Singapore")),
+        ]
+        _pm_country_labels = [label for _, label in PM_COUNTRIES]
+        _pm_country_map    = {label: eng for eng, label in PM_COUNTRIES}
+
         # ── 詳細フィルタ ──
-        with st.expander(tl("🔧 詳細フィルタ（著者・機関・年・出版タイプ・言語）",
-                            "🔧 Advanced Filters (Author / Affiliation / Year / Type / Language)"),
+        with st.expander(tl("🔧 詳細フィルタ（著者・機関・国・年・出版タイプ・言語）",
+                            "🔧 Advanced Filters (Author / Affiliation / Country / Year / Type / Language)"),
                          expanded=False):
 
             fc1, fc2 = st.columns(2)
@@ -1292,6 +1315,18 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             )
             pm_lang = PM_LANGUAGES[pm_lang_label]
 
+            pm_country_labels = st.multiselect(
+                tl("🌏 国フィルタ [ad]（複数選択可・OR検索）",
+                   "🌏 Country filter [ad] (multi-select, OR search)"),
+                _pm_country_labels,
+                key="s1_pm_countries"
+            )
+            if pm_country_labels:
+                st.caption(tl(
+                    "※ 著者所属テキスト（[ad]）に国名が含まれる論文を絞り込みます。",
+                    "※ Filters papers where the author affiliation text [ad] contains the country name."
+                ))
+
         # ── クエリ組み立て ──
         def build_pubmed_query():
             parts = []
@@ -1322,6 +1357,15 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             )
             if lang:
                 parts.append(f"{lang}[la]")
+            # 国フィルタ：複数選択時はOR結合
+            sel_country_labels = st.session_state.get("s1_pm_countries", [])
+            if sel_country_labels:
+                country_terms = [f'"{_pm_country_map[lb]}"[Affiliation]'
+                                 for lb in sel_country_labels if lb in _pm_country_map]
+                if len(country_terms) == 1:
+                    parts.append(country_terms[0])
+                elif country_terms:
+                    parts.append("(" + " OR ".join(country_terms) + ")")
             return " AND ".join(parts)
 
         pm_query = build_pubmed_query()
