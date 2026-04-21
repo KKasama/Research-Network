@@ -215,6 +215,277 @@ def fetch_works_pubmed(query, max_papers=500):
     return works
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_patents_lens(keyword, api_key, max_patents=50):
+    """Lens.orgで特許検索 → NPL引用を含む特許リストを返す"""
+    url = "https://api.lens.org/patent/search"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "query": {
+            "query_string": {
+                "query": keyword,
+                "fields": ["title"],
+            }
+        },
+        "size": min(max_patents, 100),
+        "include": [
+            "lens_id",
+            "biblio.invention_title",
+            "biblio.parties",
+            "biblio.references_cited",
+            "biblio.classifications_ipcr",
+            "abstract",
+            "date_published",
+        ],
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        if r.status_code == 401:
+            st.error(tl(
+                "Lens.org APIキーが無効です。正しいキーを入力してください。",
+                "Lens.org API key is invalid. Please enter a valid key."
+            ))
+            return []
+        if r.status_code == 429:
+            st.error(tl(
+                "Lens.org APIのレート制限に達しました。しばらく待ってから再試行してください。",
+                "Lens.org API rate limit reached. Please wait and try again."
+            ))
+            return []
+        if r.status_code != 200:
+            st.error(tl(
+                f"Lens.org APIエラー (HTTP {r.status_code}): {r.text[:200]}",
+                f"Lens.org API error (HTTP {r.status_code}): {r.text[:200]}"
+            ))
+            return []
+        data = r.json()
+    except Exception as e:
+        st.error(tl(f"Lens.org接続エラー: {e}", f"Lens.org connection error: {e}"))
+        return []
+
+    results = data.get("data", [])
+    patents = []
+    for item in results:
+        biblio = item.get("biblio", {})
+
+        # Title (prefer English)
+        title = ""
+        for t in biblio.get("invention_title", []):
+            if t.get("lang") == "en":
+                title = t.get("text", "")
+                break
+        if not title:
+            titles = biblio.get("invention_title", [])
+            if titles:
+                title = titles[0].get("text", "")
+
+        # Abstract (prefer English)
+        abstract = ""
+        for ab in item.get("abstract", []):
+            if ab.get("lang") == "en":
+                abstract = ab.get("text", "")
+                break
+        if not abstract:
+            abs_list = item.get("abstract", [])
+            if abs_list:
+                abstract = abs_list[0].get("text", "")
+
+        # Inventors
+        parties = biblio.get("parties", {})
+        inventors = [
+            inv.get("extracted_name", {}).get("value", "")
+            for inv in parties.get("inventors", [])
+            if inv.get("extracted_name", {}).get("value")
+        ]
+
+        # Applicants
+        applicants = [
+            app.get("extracted_name", {}).get("value", "")
+            for app in parties.get("applicants", [])
+            if app.get("extracted_name", {}).get("value")
+        ]
+
+        # IPC codes
+        ipc_codes = [
+            cl.get("symbol", "")
+            for cl in biblio.get("classifications_ipcr", {}).get("classifications", [])
+            if cl.get("symbol")
+        ]
+
+        # NPL citations
+        npl_citations = []
+        doi_pattern = re.compile(r'10\.\d{4,9}/[^\s,;"\']+(?=[,\s"\']|$)')
+        for cit in biblio.get("references_cited", {}).get("citations", []):
+            nplcit = cit.get("nplcit")
+            if nplcit:
+                text = nplcit.get("text", "")
+                doi = nplcit.get("doi", "")
+                if not doi:
+                    m = doi_pattern.search(text)
+                    if m:
+                        doi = m.group(0).rstrip(".,;)")
+                npl_citations.append({"text": text, "doi": doi})
+
+        patents.append({
+            "lens_id": item.get("lens_id", ""),
+            "title": title,
+            "date_published": item.get("date_published", ""),
+            "inventors": inventors,
+            "applicants": applicants,
+            "ipc_codes": ipc_codes,
+            "abstract": abstract,
+            "npl_citations": npl_citations,
+        })
+
+    return patents
+
+
+def resolve_npl_to_works(npl_list):
+    """NPLテキストからDOIを抽出し、OpenAlexで論文情報を照合する"""
+    doi_pattern = re.compile(r'10\.\d{4,9}/[^\s,;"\']+(?=[,\s"\']|$)')
+    seen_dois = set()
+    works = []
+
+    for npl in npl_list:
+        doi = npl.get("doi", "")
+        text = npl.get("text", "")
+        if not doi:
+            m = doi_pattern.search(text)
+            if m:
+                doi = m.group(0).rstrip(".,;)")
+        if not doi:
+            continue
+        doi_clean = doi.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
+        if not doi_clean or doi_clean in seen_dois:
+            continue
+        seen_dois.add(doi_clean)
+
+        try:
+            url = f"https://api.openalex.org/works/https://doi.org/{doi_clean}"
+            r = requests.get(url, params={"mailto": "research@example.com"}, timeout=10)
+            if r.status_code == 200:
+                w = r.json()
+                if w.get("id"):
+                    works.append(w)
+        except Exception:
+            continue
+
+    return works
+
+
+def build_patent_paper_network(patents, resolved_works):
+    """特許→論文の引用ネットワークをVOSviewer JSON形式で構築"""
+    # Build DOI lookup for resolved works
+    doi_to_work = {}
+    for w in resolved_works:
+        doi = (w.get("doi") or "").replace("https://doi.org/", "").replace("http://doi.org/", "").strip("/")
+        if doi:
+            doi_to_work[doi] = w
+
+    doi_pattern = re.compile(r'10\.\d{4,9}/[^\s,;"\']+(?=[,\s"\']|$)')
+
+    items = []
+    links = []
+    node_id_counter = [1]
+
+    # Patent nodes (cluster=1)
+    patent_node_map = {}  # lens_id -> node_id
+    for pat in patents:
+        nid = node_id_counter[0]
+        node_id_counter[0] += 1
+        patent_node_map[pat["lens_id"]] = nid
+        npl_count = len(pat.get("npl_citations", []))
+        year_str = (pat.get("date_published") or "")[:4]
+        label = (pat.get("title") or pat["lens_id"])[:60]
+        if year_str:
+            label = f"{label} ({year_str})"
+        item = {
+            "id": nid,
+            "label": label,
+            "cluster": 1,
+            "weights": {"NPL Citations": npl_count},
+            "description": "Patent: " + pat["lens_id"],
+        }
+        items.append(item)
+
+    # Paper nodes (cluster=2)
+    paper_node_map = {}  # doi -> node_id
+    for w in resolved_works:
+        doi = (w.get("doi") or "").replace("https://doi.org/", "").replace("http://doi.org/", "").strip("/")
+        if not doi or doi in paper_node_map:
+            continue
+        nid = node_id_counter[0]
+        node_id_counter[0] += 1
+        paper_node_map[doi] = nid
+        title = (w.get("title") or doi)[:60]
+        year = w.get("publication_year")
+        if year:
+            title = f"{title} ({year})"
+        item = {
+            "id": nid,
+            "label": title,
+            "cluster": 2,
+            "weights": {"Citations": w.get("cited_by_count", 0) or 0},
+            "description": "Paper: " + (w.get("doi") or ""),
+        }
+        if year:
+            item["scores"] = {"Year": int(year)}
+        if w.get("doi"):
+            item["url"] = w["doi"]
+        items.append(item)
+
+    # Patent→Paper edges
+    seen_links = set()
+    patent_to_dois = {}  # lens_id -> set of dois cited
+    for pat in patents:
+        cited_dois = set()
+        for npl in pat.get("npl_citations", []):
+            doi = npl.get("doi", "")
+            if not doi:
+                m = doi_pattern.search(npl.get("text", ""))
+                if m:
+                    doi = m.group(0).rstrip(".,;)")
+            doi_clean = doi.replace("https://doi.org/", "").replace("http://doi.org/", "").strip("/")
+            if doi_clean and doi_clean in paper_node_map:
+                cited_dois.add(doi_clean)
+                src = patent_node_map[pat["lens_id"]]
+                tgt = paper_node_map[doi_clean]
+                edge_key = (src, tgt)
+                if edge_key not in seen_links:
+                    seen_links.add(edge_key)
+                    links.append({"source_id": src, "target_id": tgt, "strength": 1})
+        patent_to_dois[pat["lens_id"]] = cited_dois
+
+    # Paper→Paper edges via bibliographic coupling (shared patent citations)
+    paper_dois = list(paper_node_map.keys())
+    doi_to_patents = defaultdict(set)
+    for lens_id, dois in patent_to_dois.items():
+        for doi in dois:
+            doi_to_patents[doi].add(lens_id)
+
+    paper_cooccur = defaultdict(int)
+    for doi1 in paper_dois:
+        for doi2 in paper_dois:
+            if doi1 >= doi2:
+                continue
+            shared = len(doi_to_patents[doi1] & doi_to_patents[doi2])
+            if shared >= 1:
+                paper_cooccur[(doi1, doi2)] = shared
+
+    for (doi1, doi2), strength in paper_cooccur.items():
+        src = paper_node_map[doi1]
+        tgt = paper_node_map[doi2]
+        edge_key = (min(src, tgt), max(src, tgt))
+        if edge_key not in seen_links:
+            seen_links.add(edge_key)
+            links.append({"source_id": src, "target_id": tgt, "strength": strength})
+
+    return {"items": items, "links": links}
+
+
 def reconstruct_abstract(inv_index, work=None):
     """OpenAlex inverted index から abstract を再構成する。
     PubMed論文の場合は _abstract フィールドを直接返す。"""
@@ -816,7 +1087,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
     st.subheader(tl("🗄️ データソース選択","🗄️ Data Source"))
     data_source = st.radio(
         tl("データソース","Data source"),
-        ["OpenAlex", "PubMed"],
+        ["OpenAlex", "PubMed", tl("🔬 特許 (Lens.org)", "🔬 Patents (Lens.org)")],
         horizontal=True,
         key="s1_data_source",
     )
@@ -875,6 +1146,128 @@ if tl("① データ収集・保存","① Collect & Save") in step:
 
     if data_source == "PubMed":
         # PubMed モードでは以下のOpenAlex専用UIは不要
+        st.stop()
+
+    # ══════════════════════════════════════════
+    # Lens.org 特許検索モード
+    # ══════════════════════════════════════════
+    if tl("特許", "Patents") in data_source:
+        st.info(tl(
+            "Lens.org APIを使って特許を検索し、NPL（非特許文献）引用からOpenAlexで論文を照合します。",
+            "Search patents via Lens.org API and resolve NPL (non-patent literature) citations to papers via OpenAlex."
+        ))
+        lens_api_key = st.text_input(
+            tl("Lens.org APIキー", "Lens.org API Key"),
+            type="password",
+            key="lens_api_key",
+            placeholder=tl("Lens.orgで発行したトークンを入力", "Enter your Lens.org token"),
+        )
+        lens_keyword = st.text_input(
+            tl("検索キーワード", "Search keyword"),
+            key="lens_keyword",
+            placeholder=tl("例: CRISPR gene editing", "e.g. CRISPR gene editing"),
+        )
+        lens_max = st.slider(
+            tl("取得特許数", "Max patents to fetch"),
+            min_value=10, max_value=200, value=50, step=10,
+            key="lens_max",
+        )
+        lens_inventor = st.text_input(
+            tl("発明者名（任意）", "Inventor name (optional)"),
+            key="lens_inventor",
+            placeholder=tl("例: Zhang Feng", "e.g. Zhang Feng"),
+        )
+
+        _lens_search_disabled = not (lens_api_key.strip() and lens_keyword.strip())
+        if st.button(
+            tl("▶ Lens.orgを検索してデータを保存", "▶ Search Lens.org & Save"),
+            type="primary", use_container_width=True,
+            disabled=_lens_search_disabled,
+            key="lens_search_btn",
+        ):
+            with st.spinner(tl("Lens.orgで特許を検索中...", "Searching patents on Lens.org...")):
+                _patents = fetch_patents_lens(lens_keyword.strip(), lens_api_key.strip(), lens_max)
+
+            if not _patents:
+                st.warning(tl("特許が見つかりませんでした。キーワードやAPIキーを確認してください。",
+                               "No patents found. Check your keyword and API key."))
+            else:
+                # Filter by inventor name if provided
+                if lens_inventor.strip():
+                    _inv_lower = lens_inventor.strip().lower()
+                    _patents = [p for p in _patents if any(
+                        _inv_lower in inv.lower() for inv in p.get("inventors", [])
+                    )]
+                    st.caption(tl(f"発明者フィルタ後: {len(_patents)}件",
+                                  f"After inventor filter: {len(_patents)} patents"))
+
+                # Collect all NPL citations
+                _all_npls = []
+                for pat in _patents:
+                    _all_npls.extend(pat.get("npl_citations", []))
+
+                _unique_npls = []
+                _seen_texts = set()
+                for npl in _all_npls:
+                    doi = npl.get("doi", "")
+                    text = npl.get("text", "")
+                    key_str = doi if doi else text[:80]
+                    if key_str and key_str not in _seen_texts:
+                        _seen_texts.add(key_str)
+                        _unique_npls.append(npl)
+
+                st.info(tl(
+                    f"特許 {len(_patents)}件 / NPL引用（ユニーク） {len(_unique_npls)}件 を検出",
+                    f"Found {len(_patents)} patents / {len(_unique_npls)} unique NPL citations"
+                ))
+
+                with st.spinner(tl("NPL引用をOpenAlexで照合中...", "Resolving NPL citations via OpenAlex...")):
+                    _resolved_works = resolve_npl_to_works(_unique_npls)
+
+                st.success(tl(
+                    f"✅ {len(_resolved_works)}件の論文を照合しました",
+                    f"✅ Resolved {len(_resolved_works)} papers"
+                ))
+
+                # Save dataset
+                _lens_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                _lens_name = re.sub(r"[^\w]", "_", lens_keyword.strip())[:20] + "_lens_" + _lens_ts
+                _lens_meta = {
+                    "source": "lens_patent",
+                    "query": lens_keyword.strip(),
+                    "max_patents": lens_max,
+                    "n_patents": len(_patents),
+                    "n_resolved_works": len(_resolved_works),
+                }
+                # Save both works (resolved papers) and patents
+                _lens_path = DATA_DIR / (_lens_name + ".json")
+                _lens_payload = {
+                    "name": _lens_name,
+                    "saved_at": datetime.datetime.now().isoformat(),
+                    "meta": _lens_meta,
+                    "works": _resolved_works,
+                    "patents": _patents,
+                }
+                with open(_lens_path, "w", encoding="utf-8") as f:
+                    json.dump(_lens_payload, f, ensure_ascii=False, indent=2)
+
+                st.success(tl(f"✅ 保存しました → {_lens_path}",
+                               f"✅ Saved → {_lens_path}"))
+                st.session_state["loaded_dataset"] = _lens_name
+                st.session_state["loaded_works"] = _resolved_works
+
+                # Preview patents
+                st.subheader(tl("特許プレビュー（上位5件）", "Patent Preview (top 5)"))
+                for pat in _patents[:5]:
+                    st.markdown(f"**{pat.get('title', 'No title')[:80]}**")
+                    _inv_str = ", ".join(pat.get("inventors", [])[:3])
+                    _npl_n = len(pat.get("npl_citations", []))
+                    st.caption(
+                        f"{pat.get('date_published','')[:10]}  |  {_inv_str}"
+                        f"  |  NPL引用: {_npl_n}件  |  ID: {pat.get('lens_id','')}"
+                    )
+                    st.markdown("---")
+
         st.stop()
 
     # ── 以下は OpenAlex モード専用 ──
@@ -2265,6 +2658,68 @@ function openGephiLite() {{
                 if st.button(tl("✕ 選択解除","✕ Clear"), key="clr_nd"):
                     st.session_state["sel_node"] = None
                     st.rerun()
+
+        # ── 特許×論文ネットワーク（Lens.orgデータセットのみ）──
+        _patents_in_ds = data.get("patents", [])
+        if _patents_in_ds:
+            st.markdown("---")
+            st.subheader(tl("🔬 特許×論文 ネットワーク", "🔬 Patent × Paper Network"))
+            st.caption(tl(
+                "特許のNPL引用から照合された論文とのリンクを VOSviewer JSON 形式でエクスポートします。",
+                "Export patent-to-paper NPL citation links as VOSviewer JSON."
+            ))
+
+            _pat_n = len(_patents_in_ds)
+            _paper_n = len(works)
+            _npl_total = sum(len(p.get("npl_citations", [])) for p in _patents_in_ds)
+            _pm1, _pm2, _pm3 = st.columns(3)
+            _pm1.metric(tl("特許数", "Patents"), _pat_n)
+            _pm2.metric(tl("照合論文数", "Resolved papers"), _paper_n)
+            _pm3.metric(tl("NPL引用（合計）", "NPL citations (total)"), _npl_total)
+
+            if st.button(
+                tl("▶ 特許×論文ネットワーク構築 & ダウンロード",
+                   "▶ Build Patent×Paper Network & Download"),
+                type="primary", key="build_patent_network",
+                use_container_width=True,
+            ):
+                with st.spinner(tl("特許×論文ネットワークを構築中...",
+                                   "Building patent×paper network...")):
+                    _pp_net = build_patent_paper_network(_patents_in_ds, works)
+
+                _pp_items = _pp_net.get("items", [])
+                _pp_links = _pp_net.get("links", [])
+                _pp_patents = [i for i in _pp_items if i.get("cluster") == 1]
+                _pp_papers  = [i for i in _pp_items if i.get("cluster") == 2]
+
+                st.success(tl(
+                    f"✅ ノード: 特許 {len(_pp_patents)}件 / 論文 {len(_pp_papers)}件  "
+                    f"/ エッジ: {len(_pp_links)}件",
+                    f"✅ Nodes: {len(_pp_patents)} patents / {len(_pp_papers)} papers  "
+                    f"/ Edges: {len(_pp_links)}"
+                ))
+
+                if _pp_items:
+                    _pp_json = json.dumps({"network": _pp_net}, ensure_ascii=False, indent=2)
+                    _pp_fname = re.sub(r"[^\w]", "_", selected_ds[:30]) + "_patent_paper.json"
+                    st.download_button(
+                        tl("📥 VOSviewer JSON ダウンロード（特許×論文）",
+                           "📥 Download VOSviewer JSON (Patent×Paper)"),
+                        data=_pp_json.encode("utf-8"),
+                        file_name=_pp_fname,
+                        mime="application/json",
+                        type="primary",
+                        key="dl_patent_paper_net",
+                    )
+                    st.info(tl(
+                        "💡 VOSviewerで開いて Cluster 1（特許）と Cluster 2（論文）の色分けを確認できます。",
+                        "💡 Open in VOSviewer to see Cluster 1 (patents) and Cluster 2 (papers) colored separately."
+                    ))
+                else:
+                    st.warning(tl(
+                        "リンクが見つかりませんでした。DOIが抽出されなかった可能性があります。",
+                        "No links found. DOIs may not have been extracted from NPL citations."
+                    ))
 
 # ════════════════════════════════════════════
 # ステップ3: KAKEN助成金分析
