@@ -55,17 +55,38 @@ def tl(ja, en):
 
 # ── KeyBERTモデル定義 ──
 KEYBERT_MODELS = {
-    "SciBERT (学術論文全般)":       ("allenai/scibert_scivocab_uncased",       "📚 学術論文全般（推奨）"),
-    "BioBERT":                      ("dmis-lab/biobert-base-cased-v1.2",       "🧬 生命科学・医療・心理・福祉系"),
-    "MiniLM (English)":             ("all-MiniLM-L6-v2",                       "🌐 英語・一般（汎用・高速）"),
-    "Multilingual MiniLM (多言語)": ("paraphrase-multilingual-MiniLM-L12-v2",  "🌍 多言語・日本語対応"),
+    "SciBERT": (
+        "allenai/scibert_scivocab_uncased",
+        tl("📚 学術論文全般（推奨）", "📚 General academic papers (recommended)"),
+    ),
+    "BioBERT": (
+        "dmis-lab/biobert-base-cased-v1.2",
+        tl("🧬 生命科学・医療・心理・福祉系", "🧬 Life science / medicine / psychology"),
+    ),
+    "MiniLM (English)": (
+        "all-MiniLM-L6-v2",
+        tl("🌐 英語・一般（汎用・高速）", "🌐 English, general (fast)"),
+    ),
+    "Multilingual MiniLM": (
+        "paraphrase-multilingual-MiniLM-L12-v2",
+        tl("🌍 多言語・日本語対応", "🌍 Multilingual, Japanese supported"),
+    ),
 }
 
 # BERTopic / K-means は汎用モデルのみ使用（ドメイン特化モデルは不適）
 BERTOPIC_MODELS = {
-    "MiniLM (general / English)":       ("all-MiniLM-L6-v2",                          "🌐 英語・汎用（高速）"),
-    "Multilingual MiniLM (多言語)":     ("paraphrase-multilingual-MiniLM-L12-v2",     "🌍 多言語対応"),
-    "MPNet (general / 高精度)":         ("all-mpnet-base-v2",                          "🎯 英語・高精度（低速）"),
+    "MiniLM (English)": (
+        "all-MiniLM-L6-v2",
+        tl("🌐 英語・汎用（高速）", "🌐 English, general (fast)"),
+    ),
+    "Multilingual MiniLM": (
+        "paraphrase-multilingual-MiniLM-L12-v2",
+        tl("🌍 多言語対応", "🌍 Multilingual"),
+    ),
+    "MPNet (high accuracy)": (
+        "all-mpnet-base-v2",
+        tl("🎯 英語・高精度（低速）", "🎯 English, high accuracy (slow)"),
+    ),
 }
 
 # ────────────────────────────────────────────
