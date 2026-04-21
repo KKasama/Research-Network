@@ -1183,12 +1183,36 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             "Fetching papers from PubMed (NCBI). Citation counts and references are not available."
         ))
 
-        # ── キーワード（必須） ──
-        pm_kw = st.text_input(
-            tl("🔍 キーワード（タイトル・抄録）","🔍 Keyword (Title / Abstract)"),
+        # ── キーワード（必須） + 検索フィールド ──
+        PM_FIELD_OPTIONS = {
+            tl("全フィールド（PubMed標準）","All Fields (PubMed default)"): "",
+            tl("タイトル・抄録 [tiab]","Title / Abstract [tiab]"): "[Title/Abstract]",
+            tl("タイトルのみ [ti]","Title only [ti]"): "[Title]",
+            tl("MeSH用語 [mh]","MeSH Terms [mh]"): "[MeSH Terms]",
+        }
+        kw_col, field_col = st.columns([3, 2])
+        pm_kw = kw_col.text_input(
+            tl("🔍 キーワード","🔍 Keyword"),
             key="s1_pm_kw",
-            placeholder=tl("例: COVID-19 vaccine efficacy","e.g. COVID-19 vaccine efficacy")
+            placeholder=tl("例: lung cancer","e.g. lung cancer")
         )
+        pm_field_label = field_col.selectbox(
+            tl("検索フィールド","Search field"),
+            list(PM_FIELD_OPTIONS.keys()),
+            key="s1_pm_field"
+        )
+        pm_field_tag = PM_FIELD_OPTIONS[pm_field_label]
+
+        PM_LANGUAGES = {
+            tl("指定なし","Any"): "",
+            "English": "english",
+            "Japanese": "japanese",
+            "Chinese": "chinese",
+            "French": "french",
+            "German": "german",
+            "Spanish": "spanish",
+            "Korean": "korean",
+        }
 
         # ── 詳細フィルタ ──
         with st.expander(tl("🔧 詳細フィルタ（著者・機関・年・出版タイプ・言語）",
@@ -1207,17 +1231,26 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                 placeholder=tl("例: Tohoku University","e.g. Tohoku University")
             )
 
-            yc1, yc2 = st.columns(2)
-            pm_year_from = yc1.number_input(
-                tl("📅 開始年","📅 Year from"),
-                min_value=1900, max_value=2026, value=2015, step=1,
-                key="s1_pm_year_from"
+            pm_year_enabled = st.toggle(
+                tl("📅 年フィルタを有効にする","📅 Enable year filter"),
+                value=False,
+                key="s1_pm_year_enabled"
             )
-            pm_year_to = yc2.number_input(
-                tl("📅 終了年","📅 Year to"),
-                min_value=1900, max_value=2026, value=2026, step=1,
-                key="s1_pm_year_to"
-            )
+            if pm_year_enabled:
+                yc1, yc2 = st.columns(2)
+                pm_year_from = yc1.number_input(
+                    tl("開始年","Year from"),
+                    min_value=1900, max_value=2026, value=2015, step=1,
+                    key="s1_pm_year_from"
+                )
+                pm_year_to = yc2.number_input(
+                    tl("終了年","Year to"),
+                    min_value=1900, max_value=2026, value=2026, step=1,
+                    key="s1_pm_year_to"
+                )
+            else:
+                pm_year_from = st.session_state.get("s1_pm_year_from", 2015)
+                pm_year_to   = st.session_state.get("s1_pm_year_to",   2026)
 
             PM_PUB_TYPES = [
                 "Journal Article", "Review", "Systematic Review",
@@ -1231,16 +1264,6 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                 key="s1_pm_pub_types"
             )
 
-            PM_LANGUAGES = {
-                tl("指定なし","Any"): "",
-                "English": "english",
-                "Japanese": "japanese",
-                "Chinese": "chinese",
-                "French": "french",
-                "German": "german",
-                "Spanish": "spanish",
-                "Korean": "korean",
-            }
             pm_lang_label = st.selectbox(
                 tl("🌐 言語 [la]","🌐 Language [la]"),
                 list(PM_LANGUAGES.keys()),
@@ -1252,20 +1275,30 @@ if tl("① データ収集・保存","① Collect & Save") in step:
         def build_pubmed_query():
             parts = []
             kw = st.session_state.get("s1_pm_kw", "").strip()
+            field_tag = PM_FIELD_OPTIONS.get(
+                st.session_state.get("s1_pm_field",
+                    tl("全フィールド（PubMed標準）","All Fields (PubMed default)")), ""
+            )
             if kw:
-                parts.append(f'"{kw}"[Title/Abstract]' if " " in kw else f"{kw}[Title/Abstract]")
+                # フレーズ検索：スペースあり → クォート付き
+                kw_q = f'"{kw}"' if " " in kw else kw
+                parts.append(f"{kw_q}{field_tag}" if field_tag else kw_q)
             author = st.session_state.get("s1_pm_author", "").strip()
             if author:
                 parts.append(f'"{author}"[Author]')
             affil = st.session_state.get("s1_pm_affil", "").strip()
             if affil:
                 parts.append(f'"{affil}"[Affiliation]')
-            yf = st.session_state.get("s1_pm_year_from", 2015)
-            yt = st.session_state.get("s1_pm_year_to", 2026)
-            parts.append(f"{yf}:{yt}[dp]")
+            # 年フィルタ：トグルONの時のみ付加
+            if st.session_state.get("s1_pm_year_enabled", False):
+                yf = st.session_state.get("s1_pm_year_from", 2015)
+                yt = st.session_state.get("s1_pm_year_to",   2026)
+                parts.append(f"{yf}:{yt}[dp]")
             for pt in st.session_state.get("s1_pm_pub_types", []):
                 parts.append(f'"{pt}"[pt]')
-            lang = PM_LANGUAGES.get(st.session_state.get("s1_pm_lang", tl("指定なし","Any")), "")
+            lang = PM_LANGUAGES.get(
+                st.session_state.get("s1_pm_lang", tl("指定なし","Any")), ""
+            )
             if lang:
                 parts.append(f"{lang}[la]")
             return " AND ".join(parts)
