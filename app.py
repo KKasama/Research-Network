@@ -11,6 +11,7 @@ import json, requests, os, re, logging, warnings
 from collections import defaultdict
 from pathlib import Path
 import datetime
+import xml.etree.ElementTree as ET
 
 # ── モデルロード時の冗長ログを抑制 ──
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -98,7 +99,127 @@ def fetch_works(filters, per_page=500):
     return works[:per_page]
 
 
-def reconstruct_abstract(inv_index):
+@st.cache_data(ttl=3600)
+def fetch_works_pubmed(query, max_papers=500):
+    """PubMed E-utilities API から論文を取得し、OpenAlex 互換フォーマットに変換する"""
+    # Step 1: esearch で PMID リストを取得
+    search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    try:
+        r = requests.get(search_url, params={
+            "db": "pubmed",
+            "term": query,
+            "retmax": max_papers,
+            "retmode": "json",
+        }, timeout=20)
+        data = r.json()
+        ids = data.get("esearchresult", {}).get("idlist", [])
+    except Exception as e:
+        st.error("PubMed search error: " + str(e))
+        return []
+
+    if not ids:
+        return []
+
+    # Step 2: efetch で XML 詳細を取得（100件ずつ）
+    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    works = []
+    batch_size = 100
+    for i in range(0, len(ids), batch_size):
+        batch_ids = ids[i:i + batch_size]
+        try:
+            r2 = requests.get(fetch_url, params={
+                "db": "pubmed",
+                "id": ",".join(batch_ids),
+                "rettype": "abstract",
+                "retmode": "xml",
+            }, timeout=30)
+            root = ET.fromstring(r2.text)
+        except Exception as e:
+            st.error("PubMed fetch error: " + str(e))
+            continue
+
+        for article in root.findall(".//PubmedArticle"):
+            try:
+                # PMID
+                pmid_el = article.find(".//PMID")
+                pmid = pmid_el.text.strip() if pmid_el is not None else ""
+
+                # Title
+                title_el = article.find(".//ArticleTitle")
+                title = "".join(title_el.itertext()).strip() if title_el is not None else ""
+
+                # Year
+                year = None
+                pub_date = article.find(".//PubDate")
+                if pub_date is not None:
+                    y_el = pub_date.find("Year")
+                    if y_el is not None:
+                        try:
+                            year = int(y_el.text.strip())
+                        except Exception:
+                            year = None
+
+                # Abstract
+                abstract_parts = []
+                for ab_text in article.findall(".//AbstractText"):
+                    part = "".join(ab_text.itertext()).strip()
+                    if part:
+                        label = ab_text.get("Label", "")
+                        if label:
+                            abstract_parts.append(label + ": " + part)
+                        else:
+                            abstract_parts.append(part)
+                abstract = " ".join(abstract_parts)
+
+                # Authors
+                authorships = []
+                for pos_idx, author_el in enumerate(article.findall(".//Author")):
+                    last = author_el.findtext("LastName", "")
+                    fore = author_el.findtext("ForeName", "")
+                    name = (last + " " + fore).strip() if last else fore
+                    if not name:
+                        collective = author_el.findtext("CollectiveName", "")
+                        name = collective
+                    if name:
+                        position = "first" if pos_idx == 0 else ("last" if pos_idx == len(article.findall(".//Author")) - 1 else "middle")
+                        authorships.append({
+                            "author": {"id": "", "display_name": name},
+                            "author_position": position,
+                            "institutions": [],
+                        })
+
+                # DOI
+                doi = ""
+                for article_id in article.findall(".//ArticleId"):
+                    if article_id.get("IdType") == "doi":
+                        doi = "https://doi.org/" + article_id.text.strip()
+                        break
+
+                works.append({
+                    "id": "pmid:" + pmid,
+                    "title": title,
+                    "publication_year": year,
+                    "doi": doi,
+                    "authorships": authorships,
+                    "cited_by_count": 0,
+                    "abstract_inverted_index": {},
+                    "_abstract": abstract,
+                    "referenced_works": [],
+                    "topics": [],
+                    "_source": "pubmed",
+                    "_pmid": pmid,
+                })
+            except Exception:
+                continue
+
+    return works
+
+
+def reconstruct_abstract(inv_index, work=None):
+    """OpenAlex inverted index から abstract を再構成する。
+    PubMed論文の場合は _abstract フィールドを直接返す。"""
+    if work is not None and work.get("_abstract"):
+        return work["_abstract"]
     if not inv_index: return ""
     pos_word = {}
     for word, positions in inv_index.items():
@@ -333,7 +454,7 @@ def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     texts, wids = [], []
     for w in works:
         title    = w.get("title", "") or ""
-        abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}))
+        abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}), work=w)
         text     = _html.unescape((title + " " + abstract).strip())
         if len(text) > 20:
             texts.append(text[:512])
@@ -411,7 +532,7 @@ def build_kmeans_network(works, model_key, n_clusters=10, min_links=2):
     texts, wids = [], []
     for w in works:
         title = w.get("title","") or ""
-        abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}))
+        abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}), work=w)
         text = (title + " " + abstract).strip()
         if text:
             texts.append(text[:512])
@@ -691,6 +812,72 @@ if tl("① データ収集・保存","① Collect & Save") in step:
         else:
             st.info(tl("保存済みデータなし","No saved datasets"))
 
+    # ── データソース選択 ──
+    st.subheader(tl("🗄️ データソース選択","🗄️ Data Source"))
+    data_source = st.radio(
+        tl("データソース","Data source"),
+        ["OpenAlex", "PubMed"],
+        horizontal=True,
+        key="s1_data_source",
+    )
+
+    # ══════════════════════════════════════════
+    # PubMed モード
+    # ══════════════════════════════════════════
+    if data_source == "PubMed":
+        st.info(tl(
+            "PubMed (NCBI) から論文を取得します。被引用数・参考文献データは取得できません。",
+            "Fetching papers from PubMed (NCBI). Citation counts and references are not available."
+        ))
+        pm_kw = st.text_input(
+            tl("🔍 PubMed 検索キーワード","🔍 PubMed search keyword"),
+            key="s1_pm_kw",
+            placeholder=tl("例: COVID-19 vaccine efficacy","e.g. COVID-19 vaccine efficacy")
+        )
+        pm_max = st.slider(tl("最大取得件数","Max papers"), 50, 2000, 500, 50, key="s1_pm_max")
+
+        def _auto_dataset_name_pm():
+            base = st.session_state.get("s1_pm_kw", "") or "pubmed_dataset"
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+            return re.sub(r"[^\w]", "_", base)[:25] + "_" + ts
+
+        if st.button(
+            tl("▶ PubMedを検索してデータを保存","▶ Search PubMed & Save"),
+            type="primary", use_container_width=True,
+            disabled=not pm_kw.strip()
+        ):
+            with st.spinner(tl("PubMedを検索中...","Searching PubMed...")):
+                pm_works = fetch_works_pubmed(pm_kw.strip(), pm_max)
+            if pm_works:
+                pm_name = _auto_dataset_name_pm()
+                pm_meta = {
+                    "keyword": pm_kw,
+                    "source": "pubmed",
+                    "max_papers": pm_max,
+                }
+                pm_path = save_dataset(pm_name, pm_works, pm_meta)
+                st.success(tl(f"✅ {len(pm_works):,}件保存 → {pm_path}",
+                              f"✅ {len(pm_works):,} papers saved → {pm_path}"))
+                st.session_state["loaded_dataset"] = pm_name
+                st.session_state["loaded_works"] = pm_works
+                st.subheader(tl("プレビュー（上位5件）","Preview (top 5)"))
+                for w in pm_works[:5]:
+                    title = w.get("title","") or ""
+                    year  = str(w.get("publication_year","") or "")
+                    doi   = w.get("doi","") or ""
+                    authors = [a.get("author",{}).get("display_name","") for a in w.get("authorships",[])[:2]]
+                    st.markdown(f"**{title[:80]}**")
+                    st.caption(year + "  |  " + ", ".join(filter(None, authors)) +
+                               (f"  |  [DOI]({doi})" if doi else ""))
+                    st.markdown("---")
+            else:
+                st.warning(tl("該当なし","No results found"))
+
+    if data_source == "PubMed":
+        # PubMed モードでは以下のOpenAlex専用UIは不要
+        st.stop()
+
+    # ── 以下は OpenAlex モード専用 ──
     topics_all = load_topics_data()
     topic_map  = {t_["display_name"]: t_["id"].replace("https://openalex.org/T","") for t_ in topics_all}
     all_label  = tl("-- すべて --","-- All --")
@@ -952,6 +1139,27 @@ if tl("① データ収集・保存","① Collect & Save") in step:
     )
     sel_country_codes = [code for code, label in COUNTRIES if label in sel_country_labels]
 
+    # 国コード直接入力フィルタ（任意）
+    s1_country_code_input = st.text_input(
+        tl(
+            "🌐 国コード直接入力フィルタ（任意・例: JP, US）",
+            "🌐 Country code filter (optional, e.g. JP, US)"
+        ),
+        key="s1_country_code_input",
+        placeholder=tl("空欄=フィルタなし　例: JP", "Leave empty for no filter. e.g. JP"),
+        help=tl(
+            "ISO 3166-1 alpha-2 の国コードを入力すると OpenAlex の "
+            "`institutions.country_code` フィルタに追加されます。"
+            "上の複数選択と組み合わせることもできます。",
+            "Enter an ISO 3166-1 alpha-2 country code to add an "
+            "`institutions.country_code` filter to OpenAlex. "
+            "Can be combined with the multi-select above."
+        ),
+    )
+    s1_country_code_clean = s1_country_code_input.strip().upper() if s1_country_code_input else ""
+    if s1_country_code_clean and s1_country_code_clean not in sel_country_codes:
+        sel_country_codes.append(s1_country_code_clean)
+
     def _auto_dataset_name():
         base = (
             (st.session_state.s1_ego_author_names[0] if st.session_state.s1_ego_author_names else "") or
@@ -1121,6 +1329,39 @@ else:
     col_info1.metric(tl("論文数","Papers"), len(works))
     col_info2.metric(tl("保存日","Saved"), data.get("saved_at","")[:10])
     col_info3.metric(tl("クエリ","Query"), meta.get("query","")[:20])
+
+    st.markdown("---")
+
+    # ── 研究シナリオガイド ──
+    with st.expander(tl("🗺️ 研究シナリオガイド","🗺️ Research Scenario Guide"), expanded=False):
+        st.markdown(tl(
+            """このアプリで実行できる代表的な **6つの研究シナリオ** と、使うべき機能の対応表です。
+
+| # | シナリオ | 推奨手法 | ステップ |
+|---|----------|----------|----------|
+| 1 | **研究コミュニティの把握**<br>誰が中心的な研究者か、どのグループが存在するか | 共著ネットワーク → 中心性ランキング | Step2 |
+| 2 | **研究トレンドの発見**<br>どのトピックが急成長しているか | BERTopic / K-means クラスタリング → ホワイトスペース可視化 | Step2 |
+| 3 | **ホワイトスペース（空白領域）の特定**<br>論文数が少なく引用が高いニッチ分野を発見 | BERTopic / K-means → ホワイトスペース散布図 | Step2 |
+| 4 | **国際動向の比較**<br>どの国が主導しているか | 国別論文数グラフ（Step2） + 国フィルタ（Step1） | Step1+2 |
+| 5 | **重要論文・ハブの特定**<br>最も影響力のある論文・研究者は誰か | KeyBERT共起 → PageRankランキング + 重要論文ランキング | Step2 |
+| 6 | **研究費対効果の評価**<br>助成金と論文アウトカムの関係 | KAKEN分析 + 重要論文の被引用数（費用対効果の推定） | Step2+3 |
+
+> 💡 **ヒント**: シナリオ3の「ホワイトスペース」は BERTopic または K-means 実行後に自動表示されます。
+""",
+            """Here are **6 research scenarios** you can explore with this app and which features to use:
+
+| # | Scenario | Recommended Features | Step |
+|---|----------|----------------------|------|
+| 1 | **Map the research community**<br>Who are the key researchers? What groups exist? | Co-authorship network → Centrality ranking | Step 2 |
+| 2 | **Discover research trends**<br>Which topics are growing fast? | BERTopic / K-means clustering → White Space viz | Step 2 |
+| 3 | **Identify white spaces**<br>Find niches with few papers but high citation impact | BERTopic / K-means → White Space scatter plot | Step 2 |
+| 4 | **International comparison**<br>Which countries lead the field? | Papers-by-country chart (Step 2) + country filter (Step 1) | Step 1+2 |
+| 5 | **Find key papers & hubs**<br>Most influential papers and researchers | KeyBERT co-occurrence → PageRank + Key Papers ranking | Step 2 |
+| 6 | **Evaluate research funding ROI**<br>Relationship between grants and publication outcomes | KAKEN analysis + citation counts (funding cost per citation) | Step 2+3 |
+
+> 💡 **Tip**: The "White Space" scatter plot for Scenario 3 appears automatically after running BERTopic or K-means analysis.
+"""
+        ))
 
     st.markdown("---")
 
@@ -1341,7 +1582,7 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                 for w in _target:
                     wid = w.get("id", "")
                     title = w.get("title", "") or ""
-                    abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}))
+                    abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}), work=w)
                     text = _html.unescape((title + " " + abstract).strip())[:1000]
                     if text:
                         _wids.append(wid)
@@ -1641,6 +1882,121 @@ function openGephiLite() {{
                 "💡 **Usage**: Click the button → drag and drop the downloaded `.gexf` file onto Gephi Lite"
             ))
 
+        # ── ホワイトスペース可視化（Feature 4）──
+        # BERTopic または K-means クラスタリング実行後のみ表示
+        _ws_ana = st.session_state.get("analysis_type", "")
+        _cluster_map_ws = st.session_state.get("cluster_map", {})
+        _cluster_labels_ws = st.session_state.get("cluster_labels_map", {})
+        _is_cluster_ana = (
+            tl("BERTopic", "BERTopic") in _ws_ana or
+            tl("K-means", "K-means") in _ws_ana
+        )
+        if _is_cluster_ana and _cluster_map_ws:
+            st.markdown("---")
+            st.subheader(tl("🗺️ ホワイトスペース可視化", "🗺️ Research White Space"))
+            st.caption(tl(
+                "各クラスターの論文数（X軸）と平均被引用数（Y軸）を散布図で表示します。"
+                "右上＝確立された主流分野　左上＝高インパクトのニッチ（ホワイトスペース候補）",
+                "Scatter plot of cluster size (X) vs average citations (Y). "
+                "Top-right = established field. Top-left = high-impact niche (white space candidate)."
+            ))
+            try:
+                import plotly.express as px
+                import pandas as pd
+                # クラスターごとに論文数と平均被引用数を計算
+                _ws_cluster_papers = defaultdict(list)
+                for w in works:
+                    wid = w.get("id", "")
+                    clbl = _cluster_map_ws.get(wid)
+                    if clbl is not None:
+                        _ws_cluster_papers[clbl].append(w.get("cited_by_count", 0) or 0)
+                _ws_rows = []
+                for c, cits in _ws_cluster_papers.items():
+                    label = _cluster_labels_ws.get(c, f"Cluster {c}")
+                    _ws_rows.append({
+                        tl("論文数", "Papers"): len(cits),
+                        tl("平均被引用数", "Avg Citations"): round(sum(cits) / len(cits), 2) if cits else 0,
+                        tl("クラスター", "Cluster"): str(label)[:40],
+                    })
+                _ws_df = pd.DataFrame(_ws_rows)
+                if not _ws_df.empty:
+                    _ws_fig = px.scatter(
+                        _ws_df,
+                        x=tl("論文数", "Papers"),
+                        y=tl("平均被引用数", "Avg Citations"),
+                        size=tl("論文数", "Papers"),
+                        color=tl("クラスター", "Cluster"),
+                        hover_name=tl("クラスター", "Cluster"),
+                        title=tl(
+                            "クラスター別：論文数 vs 平均被引用数",
+                            "Cluster: Paper Count vs Avg Citation Count"
+                        ),
+                        size_max=60,
+                    )
+                    _ws_fig.update_layout(
+                        xaxis_title=tl("論文数（クラスター規模）", "Number of Papers (cluster size)"),
+                        yaxis_title=tl("平均被引用数", "Average Citation Count"),
+                    )
+                    st.plotly_chart(_ws_fig, use_container_width=True)
+                    st.caption(tl(
+                        "📌 左上のバブル（論文少・引用高）が研究のホワイトスペース候補です。"
+                        "右下（論文多・引用低）は競争が激しく成熟した分野です。",
+                        "📌 Bubbles in the top-left (few papers, high citations) are white space candidates. "
+                        "Bottom-right (many papers, low citations) indicates a crowded, mature field."
+                    ))
+            except ImportError:
+                st.warning(tl(
+                    "ホワイトスペース可視化には plotly が必要です。`pip install plotly`",
+                    "plotly required for White Space plot. Run `pip install plotly`."
+                ))
+
+        # ── 国際比較（Feature 5）──
+        st.markdown("---")
+        st.subheader(tl("🌍 国際比較：国別論文数", "🌍 International Comparison: Papers by Country"))
+        st.caption(tl(
+            "各論文の著者所属機関から国コードを抽出し、上位10か国の論文数を表示します。",
+            "Extracts country codes from author affiliations and shows top 10 countries by paper count."
+        ))
+        try:
+            import plotly.express as px
+            import pandas as pd
+            _country_count = defaultdict(int)
+            for w in works:
+                _seen_countries = set()
+                for auth in w.get("authorships", []):
+                    for inst in auth.get("institutions", []):
+                        cc = inst.get("country_code", "")
+                        if cc and cc not in _seen_countries:
+                            _country_count[cc] += 1
+                            _seen_countries.add(cc)
+            if _country_count:
+                _cc_df = (
+                    pd.DataFrame(list(_country_count.items()),
+                                 columns=[tl("国コード", "Country"), tl("論文数", "Papers")])
+                    .sort_values(tl("論文数", "Papers"), ascending=False)
+                    .head(10)
+                )
+                _cc_fig = px.bar(
+                    _cc_df,
+                    x=tl("国コード", "Country"),
+                    y=tl("論文数", "Papers"),
+                    color=tl("論文数", "Papers"),
+                    color_continuous_scale="Blues",
+                    title=tl("上位10か国の論文数", "Top 10 Countries by Paper Count"),
+                )
+                _cc_fig.update_layout(coloraxis_showscale=False)
+                st.plotly_chart(_cc_fig, use_container_width=True)
+            else:
+                st.info(tl(
+                    "所属機関の国情報がデータに含まれていません（PubMedデータでは利用不可）。",
+                    "No country information found in affiliations (not available for PubMed data)."
+                ))
+        except ImportError:
+            st.warning(tl(
+                "グラフ表示には plotly が必要です。`pip install plotly`",
+                "plotly required. Run `pip install plotly`."
+            ))
+
         # ── 中心性ランキング ──
         st.markdown("---")
         centrality = st.session_state.get("centrality", {})
@@ -1706,6 +2062,14 @@ function openGephiLite() {{
             "Ranks papers directly by **citation count**, independent of network analysis. "
             "A reliable importance measure even with smaller datasets."
         ))
+        st.caption(tl(
+            "💰 **研究費対被引用コスト（Funding Cost per Citation）の推定**: "
+            "ステップ3のKAKENデータで取得した助成金額をこの表の被引用数で割ることで、"
+            "「1被引用あたりの研究費」を概算できます。研究費対効果の評価指標として活用してください。",
+            "💰 **Funding Cost per Citation**: Divide the grant amount from Step 3 KAKEN data "
+            "by the citation counts in this table to estimate the cost per citation. "
+            "Use this as a proxy metric for research funding efficiency."
+        ))
 
         import pandas as pd
         _top_n_papers = st.slider(
@@ -1761,7 +2125,7 @@ function openGephiLite() {{
                 # アブストラクト
                 _w = next((w for w in works if w.get("title","") == row[tl("タイトル","Title")]), None)
                 if _w:
-                    _ab = reconstruct_abstract(_w.get("abstract_inverted_index", {}))
+                    _ab = reconstruct_abstract(_w.get("abstract_inverted_index", {}), work=_w)
                     if _ab:
                         st.markdown("**Abstract**")
                         st.write(_ab[:400] + ("..." if len(_ab) > 400 else ""))
@@ -1859,7 +2223,7 @@ function openGephiLite() {{
                         if cited: parts.append(tl(f"📊 被引用: {cited}", f"📊 Cited: {cited}"))
                         if parts: st.caption("  |  ".join(parts))
                         if doi:   st.markdown(f"[🔗 DOI]({doi})")
-                        ab = reconstruct_abstract(w.get("abstract_inverted_index",{}))
+                        ab = reconstruct_abstract(w.get("abstract_inverted_index",{}), work=w)
                         if ab:
                             st.markdown("**Abstract**")
                             st.write(ab[:500] + ("..." if len(ab)>500 else ""))
