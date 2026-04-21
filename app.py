@@ -216,21 +216,25 @@ def fetch_works_pubmed(query, max_papers=500):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_patents_lens(keyword, api_key, max_patents=50):
+def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter=""):
     """Lens.orgで特許検索 → NPL引用を含む特許リストを返す"""
     url = "https://api.lens.org/patent/search"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    # bool queryでキーワード検索 + cites_npl:true（NPL引用あり特許のみ）
+    must_clauses = [
+        {"query_string": {"query": keyword, "fields": ["title", "abstract", "claim"]}},
+        {"term": {"cites_npl": True}},
+    ]
+    if inventor_filter.strip():
+        must_clauses.append({"match": {"inventor.name": inventor_filter.strip()}})
+
     payload = {
-        "query": {
-            "query_string": {
-                "query": keyword,
-                "fields": ["title"],
-            }
-        },
+        "query": {"bool": {"must": must_clauses}},
         "size": min(max_patents, 100),
+        "sort": [{"year_published": "desc"}],
         "include": [
             "lens_id",
             "biblio.invention_title",
@@ -315,19 +319,30 @@ def fetch_patents_lens(keyword, api_key, max_patents=50):
             if cl.get("symbol")
         ]
 
-        # NPL citations
+        # NPL citations（DOIはexternal_ids[type=doi]から取得 → なければテキストからregex）
         npl_citations = []
         doi_pattern = re.compile(r'10\.\d{4,9}/[^\s,;"\']+(?=[,\s"\']|$)')
         for cit in biblio.get("references_cited", {}).get("citations", []):
             nplcit = cit.get("nplcit")
             if nplcit:
                 text = nplcit.get("text", "")
-                doi = nplcit.get("doi", "")
+                lens_scholar_id = nplcit.get("lens_id", "")
+                # external_idsからDOI取得（正式フィールド）
+                doi = ""
+                for ext in nplcit.get("external_ids", []):
+                    if ext.get("type", "").lower() == "doi":
+                        doi = ext.get("value", "")
+                        break
+                # fallback: テキストからDOI抽出
                 if not doi:
                     m = doi_pattern.search(text)
                     if m:
                         doi = m.group(0).rstrip(".,;)")
-                npl_citations.append({"text": text, "doi": doi})
+                npl_citations.append({
+                    "text": text,
+                    "doi": doi,
+                    "lens_scholar_id": lens_scholar_id,
+                })
 
         patents.append({
             "lens_id": item.get("lens_id", ""),
@@ -344,7 +359,9 @@ def fetch_patents_lens(keyword, api_key, max_patents=50):
 
 
 def resolve_npl_to_works(npl_list):
-    """NPLテキストからDOIを抽出し、OpenAlexで論文情報を照合する"""
+    """NPLリストのDOIをOpenAlexで照合し、論文メタデータを返す
+    優先順位: 1) nplcit.external_ids[doi]  2) テキストからregex  3) lens_scholar_id経由
+    """
     doi_pattern = re.compile(r'10\.\d{4,9}/[^\s,;"\']+(?=[,\s"\']|$)')
     seen_dois = set()
     works = []
@@ -352,26 +369,42 @@ def resolve_npl_to_works(npl_list):
     for npl in npl_list:
         doi = npl.get("doi", "")
         text = npl.get("text", "")
+        # fallback: テキストからDOI抽出
         if not doi:
             m = doi_pattern.search(text)
             if m:
                 doi = m.group(0).rstrip(".,;)")
-        if not doi:
-            continue
-        doi_clean = doi.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
-        if not doi_clean or doi_clean in seen_dois:
-            continue
-        seen_dois.add(doi_clean)
-
-        try:
-            url = f"https://api.openalex.org/works/https://doi.org/{doi_clean}"
-            r = requests.get(url, params={"mailto": "research@example.com"}, timeout=10)
-            if r.status_code == 200:
-                w = r.json()
-                if w.get("id"):
-                    works.append(w)
-        except Exception:
-            continue
+        doi_clean = doi.replace("https://doi.org/", "").replace("http://doi.org/", "").strip().rstrip(".")
+        if doi_clean and doi_clean not in seen_dois:
+            seen_dois.add(doi_clean)
+            try:
+                r = requests.get(
+                    f"https://api.openalex.org/works/https://doi.org/{doi_clean}",
+                    params={"mailto": "research@example.com"}, timeout=10
+                )
+                if r.status_code == 200:
+                    w = r.json()
+                    if w.get("id"):
+                        works.append(w)
+                        continue
+            except Exception:
+                pass
+        # fallback: lens_scholar_id でOpenAlex external_id検索
+        lens_sid = npl.get("lens_scholar_id", "")
+        if lens_sid and lens_sid not in seen_dois:
+            seen_dois.add(lens_sid)
+            try:
+                r = requests.get(
+                    "https://api.openalex.org/works",
+                    params={"filter": f"ids.lens:{lens_sid}", "mailto": "research@example.com"},
+                    timeout=10
+                )
+                if r.status_code == 200:
+                    results = r.json().get("results", [])
+                    if results:
+                        works.append(results[0])
+            except Exception:
+                pass
 
     return works
 
@@ -1186,7 +1219,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             key="lens_search_btn",
         ):
             with st.spinner(tl("Lens.orgで特許を検索中...", "Searching patents on Lens.org...")):
-                _patents = fetch_patents_lens(lens_keyword.strip(), lens_api_key.strip(), lens_max)
+                _patents = fetch_patents_lens(lens_keyword.strip(), lens_api_key.strip(), lens_max, inventor_filter=lens_inventor.strip())
 
             if not _patents:
                 st.warning(tl("特許が見つかりませんでした。キーワードやAPIキーを確認してください。",
