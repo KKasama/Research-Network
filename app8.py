@@ -1108,10 +1108,13 @@ with st.sidebar:
     st.title("🔬 Research Network v2")
     st.markdown("---")
 
-    # ── OpenAlex 設定 ──
-    with st.expander(tl("⚙️ OpenAlex 設定", "⚙️ OpenAlex Settings"), expanded=False):
+    # ── API 設定（OpenAlex / Lens.org）──
+    with st.expander(tl("⚙️ API 設定", "⚙️ API Settings"), expanded=False):
+
+        # ── OpenAlex ──
+        st.markdown(f"**🔓 OpenAlex**")
         st.caption(tl(
-            "メールアドレスを登録すると OpenAlex の Polite Pool が適用され、レート制限が緩和されます。",
+            "メールアドレスを登録すると Polite Pool が適用され、レート制限が緩和されます。",
             "Registering your email enables OpenAlex Polite Pool for better rate limits."
         ))
         _email_input = st.text_input(
@@ -1130,6 +1133,30 @@ with st.sidebar:
             ))
         else:
             st.info(tl("⚠️ 未設定（デフォルトPoolを使用中）", "⚠️ Not set (using default pool)"))
+
+        st.markdown("---")
+
+        # ── Lens.org ──
+        st.markdown(f"**🔑 Lens.org**")
+        st.caption(tl(
+            "特許検索（NPL引用ネットワーク）に使用します。Lens.orgで発行したAPIトークンを入力してください。",
+            "Used for patent search and NPL citation network. Enter your Lens.org API token."
+        ))
+        _lens_key_input = st.text_input(
+            tl("Lens.org APIキー", "Lens.org API Key"),
+            value=st.session_state.get("lens_api_key", ""),
+            type="password",
+            placeholder=tl("Lens.orgで発行したトークン", "Your Lens.org token"),
+            key="lens_api_key_sidebar"
+        )
+        if _lens_key_input != st.session_state.get("lens_api_key", ""):
+            st.session_state["lens_api_key"] = _lens_key_input
+            st.rerun()
+        if st.session_state.get("lens_api_key", ""):
+            st.success(tl("✅ Lens.org APIキー設定済み", "✅ Lens.org API Key configured"))
+        else:
+            st.warning(tl("⚠️ 未設定（特許検索には必須）", "⚠️ Not set (required for patent search)"))
+
     st.markdown("---")
 
     # ステップ表示
@@ -1504,12 +1531,16 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             "Lens.org APIを使って特許を検索し、NPL（非特許文献）引用からOpenAlexで論文を照合します。",
             "Search patents via Lens.org API and resolve NPL (non-patent literature) citations to papers via OpenAlex."
         ))
-        lens_api_key = st.text_input(
-            tl("Lens.org APIキー", "Lens.org API Key"),
-            type="password",
-            key="lens_api_key",
-            placeholder=tl("Lens.orgで発行したトークンを入力", "Enter your Lens.org token"),
-        )
+        # APIキーはサイドバーの「⚙️ API 設定」から取得
+        lens_api_key = st.session_state.get("lens_api_key", "")
+        if not lens_api_key:
+            st.warning(tl(
+                "⚠️ Lens.org APIキーが未設定です。左サイドバーの「⚙️ API 設定」から入力してください。",
+                "⚠️ Lens.org API Key not set. Please enter it in '⚙️ API Settings' in the sidebar."
+            ))
+        else:
+            st.success(tl("✅ Lens.org APIキー設定済み（サイドバーで変更可能）",
+                          "✅ Lens.org API Key configured (changeable in sidebar)"))
         lens_keyword = st.text_input(
             tl("🔍 検索キーワード（タイトル・抄録・クレーム）", "🔍 Keyword (Title / Abstract / Claim)"),
             key="lens_keyword",
