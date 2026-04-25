@@ -2873,11 +2873,11 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                         max_per_gen=genealogy_max_per_gen,
                         mailto=_oa_email()
                     )
-            st.session_state["genealogy_nodes"]      = _g_nodes
-            st.session_state["genealogy_edges"]      = _g_edges
-            st.session_state["genealogy_seed_title"] = _seed_title
-            st.session_state["genealogy_direction"]  = genealogy_direction
-            st.session_state["analysis_type"]        = analysis_type
+            st.session_state["genealogy_nodes"]           = _g_nodes
+            st.session_state["genealogy_edges"]           = _g_edges
+            st.session_state["genealogy_seed_title"]      = _seed_title
+            st.session_state["genealogy_direction_value"] = genealogy_direction
+            st.session_state["analysis_type"]             = analysis_type
             vos_data = None  # genealogy uses its own rendering
 
         elif tl("引用分析","Citation Analysis") in analysis_type:
@@ -2919,7 +2919,7 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
     _g_ana   = st.session_state.get("analysis_type", "")
     if _g_nodes and tl("引用系譜","Citation Genealogy") in _g_ana:
         st.markdown("---")
-        _g_direction   = st.session_state.get("genealogy_direction", "backward")
+        _g_direction   = st.session_state.get("genealogy_direction_value", "backward")
         _g_seed_title  = st.session_state.get("genealogy_seed_title", "")
 
         if _g_direction == "forward":
