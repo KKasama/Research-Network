@@ -1330,7 +1330,7 @@ def render_pyvis(vos_data):
 with st.sidebar:
     col1, col2 = st.columns([3,1])
     with col2:
-        if st.button("EN" if lang=="ja" else "日本語"):
+        if st.button("EN" if lang=="ja" else "JP"):
             st.session_state.lang = "en" if lang=="ja" else "ja"
             st.rerun()
 
