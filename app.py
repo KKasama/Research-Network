@@ -53,61 +53,37 @@ lang = st.session_state.lang
 def tl(ja, en):
     return ja if lang == "ja" else en
 
-def _oa_email():
-    """OpenAlex polite pool 用メールアドレスを session_state から取得する"""
-    return st.session_state.get("openalex_email", "").strip() or "research@example.com"
-
 # ── KeyBERTモデル定義 ──
-# ※ sentence-transformers 3.x では BERT 本体モデル（scibert 等）はモダリティ検出エラーになるため
-#    sentence-transformers ネイティブのチェックポイントのみ登録する
 KEYBERT_MODELS = {
-    "SPECTER (Academic)": (
-        "allenai-specter",
-        tl("📚 学術論文専用・高精度（推奨）", "📚 Academic papers, high accuracy (recommended)"),
-    ),
-    "MiniLM (English)": (
-        "all-MiniLM-L6-v2",
-        tl("🌐 英語・一般（汎用・高速）", "🌐 English, general (fast)"),
-    ),
-    "Multilingual MiniLM": (
-        "paraphrase-multilingual-MiniLM-L12-v2",
-        tl("🌍 多言語・日本語対応", "🌍 Multilingual, Japanese supported"),
-    ),
+    "SciBERT (学術論文全般)":       ("allenai/scibert_scivocab_uncased",       "📚 学術論文全般（推奨）"),
+    "BioBERT":                      ("dmis-lab/biobert-base-cased-v1.2",       "🧬 生命科学・医療・心理・福祉系"),
+    "MiniLM (English)":             ("all-MiniLM-L6-v2",                       "🌐 英語・一般（汎用・高速）"),
+    "Multilingual MiniLM (多言語)": ("paraphrase-multilingual-MiniLM-L12-v2",  "🌍 多言語・日本語対応"),
 }
 
 # BERTopic / K-means は汎用モデルのみ使用（ドメイン特化モデルは不適）
 BERTOPIC_MODELS = {
-    "MiniLM (English)": (
-        "all-MiniLM-L6-v2",
-        tl("🌐 英語・汎用（高速）", "🌐 English, general (fast)"),
-    ),
-    "Multilingual MiniLM": (
-        "paraphrase-multilingual-MiniLM-L12-v2",
-        tl("🌍 多言語対応", "🌍 Multilingual"),
-    ),
-    "MPNet (high accuracy)": (
-        "all-mpnet-base-v2",
-        tl("🎯 英語・高精度（低速）", "🎯 English, high accuracy (slow)"),
-    ),
+    "MiniLM (general / English)":       ("all-MiniLM-L6-v2",                          "🌐 英語・汎用（高速）"),
+    "Multilingual MiniLM (多言語)":     ("paraphrase-multilingual-MiniLM-L12-v2",     "🌍 多言語対応"),
+    "MPNet (general / 高精度)":         ("all-mpnet-base-v2",                          "🎯 英語・高精度（低速）"),
 }
 
 # ────────────────────────────────────────────
 # ユーティリティ
 # ────────────────────────────────────────────
 @st.cache_data(ttl=3600)
-def fetch_works(filters, per_page=500, mailto=""):
+def fetch_works(filters, per_page=500):
     base = "https://api.openalex.org/works"
     fields = "id,title,publication_year,doi,authorships,cited_by_count,abstract_inverted_index,topics,concepts,referenced_works"
     works, cursor = [], "*"
     per_req = min(per_page, 200)
-    _mailto = mailto or "research@example.com"
     while len(works) < per_page:
         params = {
             "filter": ",".join(filters),
             "per_page": per_req,
             "cursor": cursor,
             "select": fields,
-            "mailto": _mailto
+            "mailto": "research@example.com"
         }
         try:
             r = requests.get(base, params=params, timeout=20)
@@ -195,10 +171,9 @@ def fetch_works_pubmed(query, max_papers=500):
                             abstract_parts.append(part)
                 abstract = " ".join(abstract_parts)
 
-                # Authors（所属施設も取得）
-                all_authors = article.findall(".//Author")
+                # Authors
                 authorships = []
-                for pos_idx, author_el in enumerate(all_authors):
+                for pos_idx, author_el in enumerate(article.findall(".//Author")):
                     last = author_el.findtext("LastName", "")
                     fore = author_el.findtext("ForeName", "")
                     name = (last + " " + fore).strip() if last else fore
@@ -206,19 +181,11 @@ def fetch_works_pubmed(query, max_papers=500):
                         collective = author_el.findtext("CollectiveName", "")
                         name = collective
                     if name:
-                        position = "first" if pos_idx == 0 else (
-                            "last" if pos_idx == len(all_authors) - 1 else "middle"
-                        )
-                        # 所属施設を取得
-                        affil_list = []
-                        for affil_info in author_el.findall(".//AffiliationInfo"):
-                            affil_text = affil_info.findtext("Affiliation", "").strip()
-                            if affil_text:
-                                affil_list.append({"display_name": affil_text, "ror": None})
+                        position = "first" if pos_idx == 0 else ("last" if pos_idx == len(article.findall(".//Author")) - 1 else "middle")
                         authorships.append({
                             "author": {"id": "", "display_name": name},
                             "author_position": position,
-                            "institutions": affil_list,
+                            "institutions": [],
                         })
 
                 # DOI
@@ -227,9 +194,6 @@ def fetch_works_pubmed(query, max_papers=500):
                     if article_id.get("IdType") == "doi":
                         doi = "https://doi.org/" + article_id.text.strip()
                         break
-
-                # Journal
-                journal = article.findtext(".//Journal/Title", "") or article.findtext(".//ISOAbbreviation", "")
 
                 works.append({
                     "id": "pmid:" + pmid,
@@ -244,7 +208,6 @@ def fetch_works_pubmed(query, max_papers=500):
                     "topics": [],
                     "_source": "pubmed",
                     "_pmid": pmid,
-                    "_journal": journal,
                 })
             except Exception:
                 continue
@@ -253,49 +216,20 @@ def fetch_works_pubmed(query, max_papers=500):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter="",
-                       applicant_filter="", year_from=None, year_to=None,
-                       ipc_code="", jurisdictions=None, doc_types=None, npl_only=True):
+def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter=""):
     """Lens.orgで特許検索 → NPL引用を含む特許リストを返す"""
     url = "https://api.lens.org/patent/search"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    # bool queryでキーワード検索
+    # bool queryでキーワード検索 + cites_npl:true（NPL引用あり特許のみ）
     must_clauses = [
         {"query_string": {"query": keyword, "fields": ["title", "abstract", "claim"]}},
+        {"term": {"cites_npl": True}},
     ]
-    if npl_only:
-        must_clauses.append({"term": {"cites_npl": True}})
     if inventor_filter.strip():
         must_clauses.append({"match": {"inventor.name": inventor_filter.strip()}})
-    if applicant_filter.strip():
-        must_clauses.append({"match": {"applicant.name": applicant_filter.strip()}})
-    if ipc_code.strip():
-        must_clauses.append({
-            "query_string": {
-                "query": ipc_code.strip().rstrip("*") + "*",
-                "fields": ["biblio.classifications_ipcr.symbol"],
-            }
-        })
-
-    # 年範囲フィルタ
-    if year_from or year_to:
-        range_clause = {}
-        if year_from:
-            range_clause["gte"] = int(year_from)
-        if year_to:
-            range_clause["lte"] = int(year_to)
-        must_clauses.append({"range": {"year_published": range_clause}})
-
-    # 管轄（出願国）フィルタ
-    if jurisdictions:
-        must_clauses.append({"terms": {"jurisdiction": [j.upper() for j in jurisdictions]}})
-
-    # 特許タイプフィルタ
-    if doc_types:
-        must_clauses.append({"terms": {"doc_type": doc_types}})
 
     payload = {
         "query": {"bool": {"must": must_clauses}},
@@ -309,9 +243,6 @@ def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter="",
             "biblio.classifications_ipcr",
             "abstract",
             "date_published",
-            "year_published",
-            "jurisdiction",
-            "doc_type",
         ],
     }
     try:
@@ -417,9 +348,6 @@ def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter="",
             "lens_id": item.get("lens_id", ""),
             "title": title,
             "date_published": item.get("date_published", ""),
-            "year_published": item.get("year_published", None),
-            "jurisdiction": item.get("jurisdiction", ""),
-            "doc_type": item.get("doc_type", ""),
             "inventors": inventors,
             "applicants": applicants,
             "ipc_codes": ipc_codes,
@@ -452,7 +380,7 @@ def resolve_npl_to_works(npl_list):
             try:
                 r = requests.get(
                     f"https://api.openalex.org/works/https://doi.org/{doi_clean}",
-                    params={"mailto": _oa_email()}, timeout=10
+                    params={"mailto": "research@example.com"}, timeout=10
                 )
                 if r.status_code == 200:
                     w = r.json()
@@ -468,7 +396,7 @@ def resolve_npl_to_works(npl_list):
             try:
                 r = requests.get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"ids.lens:{lens_sid}", "mailto": _oa_email()},
+                    params={"filter": f"ids.lens:{lens_sid}", "mailto": "research@example.com"},
                     timeout=10
                 )
                 if r.status_code == 200:
@@ -629,7 +557,7 @@ def list_datasets():
 # 引用トレンド取得（OpenAlex API）
 # ────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_citing_works_full(work_id: str, max_papers: int = 200, mailto: str = ""):
+def fetch_citing_works_full(work_id: str, max_papers: int = 200):
     """
     指定論文を引用している論文を、書誌結合に必要な referenced_works を含む
     完全データで取得する（被引用数順・最大 max_papers 件）。
@@ -639,7 +567,6 @@ def fetch_citing_works_full(work_id: str, max_papers: int = 200, mailto: str = "
               "cited_by_count,referenced_works,topics")
     results, cursor = [], "*"
     per_req = min(max_papers, 200)
-    _mailto = mailto or "research@example.com"
     while len(results) < max_papers:
         params = {
             "filter":   f"cites:{short_id}",
@@ -647,7 +574,7 @@ def fetch_citing_works_full(work_id: str, max_papers: int = 200, mailto: str = "
             "per_page": per_req,
             "cursor":   cursor,
             "select":   fields,
-            "mailto":   _mailto,
+            "mailto":   "research@example.com",
         }
         try:
             r = requests.get("https://api.openalex.org/works",
@@ -711,70 +638,6 @@ def compute_centrality(vos_data):
     return result
 
 # ────────────────────────────────────────────
-# sentence-transformers 直接利用によるキーワード抽出
-# ────────────────────────────────────────────────────
-def extract_keywords_with_st(texts, wids, model_name, top_n=5):
-    """
-    KeyBERT を使わず SentenceTransformer を直接呼び出すキーワード抽出。
-    sentence-transformers 3.x の Modality 検出エラーを回避。
-    アルゴリズム: CountVectorizer で n-gram 候補生成 → ST 埋め込み →
-                  文書ベクトルとのコサイン類似度で上位 top_n を選択。
-    """
-    from sentence_transformers import SentenceTransformer
-    from sklearn.feature_extraction.text import CountVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-    import numpy as np
-
-    # n-gram 候補語を抽出（全文書から最大300語）
-    try:
-        count = CountVectorizer(
-            ngram_range=(1, 2), stop_words="english", max_features=300
-        ).fit(texts)
-        candidates = count.get_feature_names_out().tolist()
-    except Exception:
-        candidates = []
-
-    if not candidates:
-        return {wid: [] for wid in wids}
-
-    model = SentenceTransformer(model_name)
-
-    # 文書と候補語を一括エンコード（KeyBERT の内部と同じ処理）
-    doc_embeddings  = model.encode(texts,      show_progress_bar=False, batch_size=32)
-    cand_embeddings = model.encode(candidates, show_progress_bar=False, batch_size=256)
-
-    result = {}
-    for wid, doc_emb in zip(wids, doc_embeddings):
-        sims    = cosine_similarity([doc_emb], cand_embeddings)[0]
-        top_idx = np.argsort(sims)[::-1][:top_n]
-        result[wid] = [candidates[j] for j in top_idx]
-
-    return result
-
-
-# TF-IDF キーワード抽出（BERT フォールバック）
-# ────────────────────────────────────────────
-def extract_keywords_tfidf(texts, wids, top_n=5):
-    """sklearn TF-IDF によるキーワード抽出。BERT が使えない場合のフォールバック。"""
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    try:
-        vec = TfidfVectorizer(
-            ngram_range=(1, 2), max_features=5000,
-            stop_words="english", min_df=1,
-        )
-        mat  = vec.fit_transform(texts)
-        names = vec.get_feature_names_out()
-        result = {}
-        for i, wid in enumerate(wids):
-            row = mat[i].toarray()[0]
-            top_idx = row.argsort()[-top_n:][::-1]
-            result[wid] = [names[j] for j in top_idx if row[j] > 0]
-        return result
-    except Exception:
-        return {wid: [] for wid in wids}
-
-
-# ────────────────────────────────────────────
 # ネットワーク構築
 # ────────────────────────────────────────────
 def build_coauth(works, min_links=2):
@@ -782,13 +645,11 @@ def build_coauth(works, min_links=2):
     for w in works:
         auths = []
         for a in w.get("authorships", []):
-            aid  = a.get("author", {}).get("id", "") or ""
-            name = a.get("author", {}).get("display_name", "") or ""
-            # PubMedはIDが空 → 著者名をキーとして使用
-            key  = aid if aid else name
-            if key and name:
-                author_info[key] = name
-                auths.append(key)
+            aid = a.get("author", {}).get("id")
+            name = a.get("author", {}).get("display_name", "")
+            if aid and name:
+                author_info[aid] = name
+                auths.append(aid)
         work_authors.append(auths)
     links = defaultdict(int)
     doc_count = defaultdict(int)
@@ -885,309 +746,6 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
         if l["source_id"] in doi_to_int and l["target_id"] in doi_to_int
     ]
     return {"items": items, "links": link_list_int}
-
-
-# ────────────────────────────────────────────
-# 引用系譜（Citation Genealogy）
-# ────────────────────────────────────────────
-def fetch_referenced_works_batch(work_ids, mailto=""):
-    """OpenAlex ID リストから論文データをバッチ取得（最大50件/リクエスト）"""
-    if not work_ids:
-        return {}
-    results = {}
-    id_list = [wid for wid in work_ids if wid]
-    chunk_size = 50
-    for i in range(0, len(id_list), chunk_size):
-        chunk = id_list[i:i + chunk_size]
-        short_ids = []
-        for wid in chunk:
-            m = re.search(r'(W\d+)', str(wid))
-            if m:
-                short_ids.append(m.group(1))
-        if not short_ids:
-            continue
-        params = {
-            "filter": f"openalex:{'|'.join(short_ids)}",
-            "per-page": chunk_size,
-            "select": "id,title,publication_year,doi,cited_by_count,authorships,referenced_works",
-        }
-        if mailto:
-            params["mailto"] = mailto
-        try:
-            resp = requests.get("https://api.openalex.org/works", params=params, timeout=25)
-            if resp.ok:
-                for w in resp.json().get("results", []):
-                    wid = w.get("id", "")
-                    if wid:
-                        results[wid] = w
-        except Exception:
-            pass
-    return results
-
-
-def build_citation_genealogy(seed_works, generations=3, max_per_gen=20, mailto=""):
-    """
-    seed_works を第0世代として referenced_works を辿り最大 N 世代の系譜を構築。
-    Returns: (nodes, edges)
-      nodes : {id -> {label, title, gen, year}}
-      edges : [(source_id, target_id)]
-    """
-    all_nodes  = {}   # id -> dict
-    all_edges  = []   # [(src, tgt)]
-    work_cache = {}   # id -> work data
-
-    # ─ Gen 0 ─
-    for w in seed_works:
-        wid = w.get("id", "") or ""
-        if not wid:
-            continue
-        title = (w.get("title", "") or wid)
-        year  = str(w.get("publication_year") or "")
-        label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
-        all_nodes[wid]  = {"label": label, "title": title, "gen": 0, "year": year}
-        work_cache[wid] = w
-
-    current_layer = set(all_nodes.keys())
-
-    for gen in range(1, generations + 1):
-        if not current_layer:
-            break
-
-        # Collect referenced IDs from current layer (limit per paper)
-        next_ref_ids = set()
-        for wid in current_layer:
-            w = work_cache.get(wid, {})
-            refs = w.get("referenced_works", [])[:max_per_gen]
-            for ref in refs:
-                if ref:
-                    all_edges.append((wid, ref))
-                    if ref not in all_nodes:
-                        next_ref_ids.add(ref)
-
-        if not next_ref_ids:
-            break
-
-        # Fetch next generation details
-        fetched = fetch_referenced_works_batch(next_ref_ids, mailto)
-        work_cache.update(fetched)
-
-        next_layer = set()
-        for ref_id in next_ref_ids:
-            w = fetched.get(ref_id, {})
-            title = (w.get("title", "") or ref_id) if w else ref_id
-            year  = str(w.get("publication_year") or "") if w else ""
-            if w:
-                label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
-                next_layer.add(ref_id)
-            else:
-                m = re.search(r'W(\d+)', str(ref_id))
-                label = f"W{m.group(1)}" if m else ref_id
-            all_nodes[ref_id] = {"label": label, "title": title, "gen": gen, "year": year}
-
-        current_layer = next_layer
-
-    return all_nodes, all_edges
-
-
-def render_genealogy_pyvis(all_nodes, all_edges):
-    """引用系譜をPyVisで有向グラフとして描画。世代ごとに色分け。"""
-    try:
-        from pyvis.network import Network
-        import tempfile
-
-        GEN_COLORS = {0: "#4477CC", 1: "#44AA66", 2: "#CC9922", 3: "#CC4444"}
-
-        net = Network(
-            height="700px", width="100%",
-            bgcolor="#f9f9f9", font_color="#333333",
-            directed=True
-        )
-        net.barnes_hut(gravity=-5000, central_gravity=0.2, spring_length=150)
-
-        # Add nodes
-        node_ids_in_graph = set(all_nodes.keys())
-        for nid, info in all_nodes.items():
-            gen   = info.get("gen", 0)
-            color = GEN_COLORS.get(gen, "#aaaaaa")
-            size  = max(8, 28 - gen * 5)
-            label = info.get("label", nid)[:30]
-            title = (
-                f"<b>Gen {gen}</b><br>"
-                f"{info.get('title', '')[:80]}<br>"
-                f"Year: {info.get('year', '—')}"
-            )
-            net.add_node(str(nid), label=label, size=size, color=color, title=title)
-
-        # Add edges (only between nodes that exist in the graph)
-        seen_edges = set()
-        for src, tgt in all_edges:
-            if src in node_ids_in_graph and tgt in node_ids_in_graph:
-                key = (str(src), str(tgt))
-                if key not in seen_edges:
-                    seen_edges.add(key)
-                    net.add_edge(str(src), str(tgt), arrows="to", color="#aaaaaa", width=1)
-
-        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
-            net.save_graph(f.name)
-            html_content = open(f.name).read()
-
-        st.components.v1.html(html_content, height=720, scrolling=False)
-
-    except ImportError:
-        st.warning(tl(
-            "pyvis 未インストール。`pip install pyvis` を実行してください。",
-            "pyvis not installed. Run `pip install pyvis`."
-        ))
-
-
-def fetch_citing_works(work_id, max_results=20, mailto=""):
-    """work_id を引用している論文を被引用数順で取得（OpenAlex cites フィルタ）"""
-    m = re.search(r'(W\d+)', str(work_id))
-    if not m:
-        return []
-    params = {
-        "filter":   f"cites:{m.group(1)}",
-        "sort":     "cited_by_count:desc",
-        "per-page": min(max_results, 50),
-        "select":   "id,title,publication_year,doi,cited_by_count,authorships,referenced_works",
-    }
-    if mailto:
-        params["mailto"] = mailto
-    try:
-        resp = requests.get("https://api.openalex.org/works", params=params, timeout=25)
-        if resp.ok:
-            return resp.json().get("results", [])
-    except Exception:
-        pass
-    return []
-
-
-def build_forward_citation_genealogy(seed_works, generations=3, max_per_gen=20, mailto=""):
-    """
-    seed_works を第0世代として、被引用論文（自分を引用している論文）を世代ごとに辿る。
-    Returns: (nodes, edges)
-      nodes : {id -> {label, title, gen, year}}
-      edges : [(citing_id, cited_id)]  ← 引用している論文 → 引用されている論文
-    """
-    all_nodes  = {}
-    all_edges  = []
-
-    # ─ Gen 0 ─
-    for w in seed_works:
-        wid = w.get("id", "") or ""
-        if not wid:
-            continue
-        title = (w.get("title", "") or wid)
-        year  = str(w.get("publication_year") or "")
-        label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
-        all_nodes[wid] = {"label": label, "title": title, "gen": 0, "year": year}
-
-    current_layer = set(all_nodes.keys())
-
-    for gen in range(1, generations + 1):
-        if not current_layer:
-            break
-
-        # 現世代の各論文を引用している論文を取得
-        # 層が大きくなるほど per_paper_limit を絞って爆発防止
-        per_paper = max(3, max_per_gen // max(1, len(current_layer)))
-
-        next_layer = set()
-        for wid in current_layer:
-            citing_list = fetch_citing_works(wid, per_paper, mailto)
-            for w in citing_list:
-                cid = w.get("id", "")
-                if not cid:
-                    continue
-                # エッジ: 引用している論文 → 引用されている論文
-                all_edges.append((cid, wid))
-                if cid not in all_nodes:
-                    title = (w.get("title", "") or cid)
-                    year  = str(w.get("publication_year") or "")
-                    label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
-                    all_nodes[cid] = {"label": label, "title": title, "gen": gen, "year": year}
-                    next_layer.add(cid)
-
-        current_layer = next_layer
-
-    return all_nodes, all_edges
-
-
-def match_papers_patents_by_doi(works, patents):
-    """論文リスト×特許リストのNPL引用をDOIで照合し、マッチペアリストを返す"""
-    doi_pat = re.compile(r'10\.\d{4,9}/[^\s,;"\']+(?=[,\s"\']|$)')
-
-    def norm_doi(d):
-        return (d or "").replace("https://doi.org/","").replace("http://doi.org/","").lower().strip().rstrip("./,")
-
-    paper_by_doi = {}
-    for w in works:
-        d = norm_doi(w.get("doi",""))
-        if d:
-            paper_by_doi[d] = w
-
-    pairs, seen = [], set()
-    for pat in patents:
-        for npl in pat.get("npl_citations", []):
-            d = norm_doi(npl.get("doi",""))
-            if not d:
-                m = doi_pat.search(npl.get("text",""))
-                if m:
-                    d = norm_doi(m.group(0))
-            if d and d in paper_by_doi:
-                key = (pat.get("lens_id",""), d)
-                if key not in seen:
-                    seen.add(key)
-                    pairs.append({
-                        "patent": pat,
-                        "paper":  paper_by_doi[d],
-                        "npl_text": npl.get("text",""),
-                    })
-    return pairs
-
-
-def render_bipartite_pyvis(pairs):
-    """論文-特許 二部有向グラフを PyVis で描画（特許→論文）"""
-    try:
-        from pyvis.network import Network
-        import tempfile
-
-        net = Network(height="620px", width="100%", bgcolor="#f9f9f9",
-                      font_color="#333333", directed=True)
-        net.barnes_hut(gravity=-4000, central_gravity=0.1, spring_length=240)
-
-        added_papers, added_patents = set(), set()
-        for pair in pairs:
-            pat    = pair["patent"]
-            paper  = pair["paper"]
-            pat_nid   = "PAT_" + pat.get("lens_id","?")
-            paper_nid = "PAP_" + (paper.get("doi","") or paper.get("id","?"))
-
-            if pat_nid not in added_patents:
-                added_patents.add(pat_nid)
-                yr  = (pat.get("date_published","") or "")[:4]
-                lbl = (pat.get("title","") or pat.get("lens_id",""))[:28]
-                net.add_node(pat_nid, label=lbl, color="#E07820", shape="square", size=22,
-                             title=f"🔧 {pat.get('title','')} [{yr}]\n{pat.get('lens_id','')}")
-
-            if paper_nid not in added_papers:
-                added_papers.add(paper_nid)
-                yr  = str(paper.get("publication_year","") or "")
-                lbl = (paper.get("title","") or "")[:28]
-                net.add_node(paper_nid, label=lbl, color="#4477CC", shape="dot", size=18,
-                             title=f"📄 {paper.get('title','')} [{yr}]\nDOI: {paper.get('doi','')}")
-
-            net.add_edge(pat_nid, paper_nid, arrows="to", color="#aaaaaa", width=1.5)
-
-        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
-            net.save_graph(f.name)
-            html_content = open(f.name).read()
-        st.components.v1.html(html_content, height=640, scrolling=False)
-
-    except ImportError:
-        st.warning(tl("pyvis 未インストール。`pip install pyvis`",
-                      "pyvis not installed. Run `pip install pyvis`."))
-
 
 def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     """BERTopicでトピッククラスタリング → ネットワーク化"""
@@ -1468,62 +1026,11 @@ def render_pyvis(vos_data):
 with st.sidebar:
     col1, col2 = st.columns([3,1])
     with col2:
-        if st.button("EN" if lang=="ja" else "JP"):
+        if st.button("EN" if lang=="ja" else "日本語"):
             st.session_state.lang = "en" if lang=="ja" else "ja"
             st.rerun()
 
     st.title("🔬 Research Network v2")
-    st.markdown("---")
-
-    # ── API 設定（OpenAlex / Lens.org）──
-    with st.expander(tl("⚙️ API 設定", "⚙️ API Settings"), expanded=False):
-
-        # ── OpenAlex ──
-        st.markdown(f"**🔓 OpenAlex**")
-        st.caption(tl(
-            "メールアドレスを登録すると Polite Pool が適用され、レート制限が緩和されます。",
-            "Registering your email enables OpenAlex Polite Pool for better rate limits."
-        ))
-        _email_input = st.text_input(
-            tl("メールアドレス（任意）", "Email Address (optional)"),
-            value=st.session_state.get("openalex_email", ""),
-            placeholder="your@email.com",
-            key="openalex_email_input"
-        )
-        if _email_input != st.session_state.get("openalex_email", ""):
-            st.session_state["openalex_email"] = _email_input
-            st.rerun()
-        if st.session_state.get("openalex_email", ""):
-            st.success(tl(
-                f"✅ Polite Pool 有効: {st.session_state['openalex_email']}",
-                f"✅ Polite Pool active: {st.session_state['openalex_email']}"
-            ))
-        else:
-            st.info(tl("⚠️ 未設定（デフォルトPoolを使用中）", "⚠️ Not set (using default pool)"))
-
-        st.markdown("---")
-
-        # ── Lens.org ──
-        st.markdown(f"**🔑 Lens.org**")
-        st.caption(tl(
-            "特許検索（NPL引用ネットワーク）に使用します。Lens.orgで発行したAPIトークンを入力してください。",
-            "Used for patent search and NPL citation network. Enter your Lens.org API token."
-        ))
-        _lens_key_input = st.text_input(
-            tl("Lens.org APIキー", "Lens.org API Key"),
-            value=st.session_state.get("lens_api_key", ""),
-            type="password",
-            placeholder=tl("Lens.orgで発行したトークン", "Your Lens.org token"),
-            key="lens_api_key_sidebar"
-        )
-        if _lens_key_input != st.session_state.get("lens_api_key", ""):
-            st.session_state["lens_api_key"] = _lens_key_input
-            st.rerun()
-        if st.session_state.get("lens_api_key", ""):
-            st.success(tl("✅ Lens.org APIキー設定済み", "✅ Lens.org API Key configured"))
-        else:
-            st.warning(tl("⚠️ 未設定（特許検索には必須）", "⚠️ Not set (required for patent search)"))
-
     st.markdown("---")
 
     # ステップ表示
@@ -1547,32 +1054,31 @@ def load_topics_data():
     return []
 
 def search_openalex(query, target, max_results=50):
-    _mailto = _oa_email()
     try:
         if target in ("Title + Abstract", "タイトル＋抄録"):
             filt = "title.search:" + query
-            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=" + _mailto
+            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=vos@example.com"
             count = requests.get(count_url, timeout=15).json().get("meta",{}).get("count",0)
-            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=" + _mailto
+            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=vos@example.com"
             results = requests.get(url, timeout=20).json().get("results",[])
             return results, count, "works"
         elif target in ("Author Name", "著者名"):
-            url = "https://api.openalex.org/authors?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,works_count,last_known_institutions&mailto=" + _mailto
+            url = "https://api.openalex.org/authors?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,works_count,last_known_institutions&mailto=vos@example.com"
             results = requests.get(url, timeout=15).json().get("results",[])
             return results, len(results), "authors"
         elif target in ("Affiliation Name", "機関名"):
-            url = "https://api.openalex.org/institutions?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,ror,country_code,type,works_count&mailto=" + _mailto
+            url = "https://api.openalex.org/institutions?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,ror,country_code,type,works_count&mailto=vos@example.com"
             results = requests.get(url, timeout=15).json().get("results",[])
             return results, len(results), "institutions"
         elif target in ("Concept", "コンセプト"):
-            c_url = "https://api.openalex.org/concepts?search=" + query + "&per_page=5&select=id,display_name,works_count&mailto=" + _mailto
+            c_url = "https://api.openalex.org/concepts?search=" + query + "&per_page=5&select=id,display_name,works_count&mailto=vos@example.com"
             concepts = requests.get(c_url, timeout=15).json().get("results",[])
             if not concepts: return [], 0, "works"
             cid = concepts[0]["id"]
             filt = "concepts.id:" + cid
-            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=" + _mailto
+            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=vos@example.com"
             count = requests.get(count_url, timeout=15).json().get("meta",{}).get("count",0)
-            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=" + _mailto
+            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=vos@example.com"
             results = requests.get(url, timeout=20).json().get("results",[])
             for r in results:
                 r["_concept_name"] = concepts[0].get("display_name", query)
@@ -1587,8 +1093,7 @@ def search_openalex(query, target, max_results=50):
 for _k, _v in [("s1_selected_topics",[]), ("s1_ego_author_ids",[]),
                 ("s1_ego_author_names",[]), ("s1_org_ror_id",None),
                 ("s1_org_name",""), ("s1_search_results",[]),
-                ("s1_search_result_type","works"), ("s1_search_count",0),
-                ("s1_affiliation_kw","")]:
+                ("s1_search_result_type","works"), ("s1_search_count",0)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -1628,263 +1133,49 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             "PubMed (NCBI) から論文を取得します。被引用数・参考文献データは取得できません。",
             "Fetching papers from PubMed (NCBI). Citation counts and references are not available."
         ))
-
-        # ── キーワード（必須） + 検索フィールド ──
-        PM_FIELD_OPTIONS = {
-            tl("全フィールド（PubMed標準）","All Fields (PubMed default)"): "",
-            tl("タイトル・抄録 [tiab]","Title / Abstract [tiab]"): "[Title/Abstract]",
-            tl("タイトルのみ [ti]","Title only [ti]"): "[Title]",
-            tl("MeSH用語 [mh]","MeSH Terms [mh]"): "[MeSH Terms]",
-        }
-        kw_col, field_col = st.columns([3, 2])
-        pm_kw = kw_col.text_input(
-            tl("🔍 キーワード","🔍 Keyword"),
+        pm_kw = st.text_input(
+            tl("🔍 PubMed 検索キーワード","🔍 PubMed search keyword"),
             key="s1_pm_kw",
-            placeholder=tl("例: lung cancer","e.g. lung cancer")
+            placeholder=tl("例: COVID-19 vaccine efficacy","e.g. COVID-19 vaccine efficacy")
         )
-        pm_field_label = field_col.selectbox(
-            tl("検索フィールド","Search field"),
-            list(PM_FIELD_OPTIONS.keys()),
-            key="s1_pm_field"
-        )
-        pm_field_tag = PM_FIELD_OPTIONS[pm_field_label]
-
-        PM_LANGUAGES = {
-            tl("指定なし","Any"): "",
-            "English": "english",
-            "Japanese": "japanese",
-            "Chinese": "chinese",
-            "French": "french",
-            "German": "german",
-            "Spanish": "spanish",
-            "Korean": "korean",
-        }
-
-        PM_COUNTRIES = [
-            ("Japan",          "🇯🇵 " + tl("日本","Japan")),
-            ("United States",  "🇺🇸 " + tl("米国","United States")),
-            ("China",          "🇨🇳 " + tl("中国","China")),
-            ("United Kingdom", "🇬🇧 " + tl("英国","United Kingdom")),
-            ("Germany",        "🇩🇪 " + tl("ドイツ","Germany")),
-            ("France",         "🇫🇷 " + tl("フランス","France")),
-            ("South Korea",    "🇰🇷 " + tl("韓国","South Korea")),
-            ("Australia",      "🇦🇺 " + tl("オーストラリア","Australia")),
-            ("Canada",         "🇨🇦 " + tl("カナダ","Canada")),
-            ("Italy",          "🇮🇹 " + tl("イタリア","Italy")),
-            ("India",          "🇮🇳 " + tl("インド","India")),
-            ("Brazil",         "🇧🇷 " + tl("ブラジル","Brazil")),
-            ("Spain",          "🇪🇸 " + tl("スペイン","Spain")),
-            ("Netherlands",    "🇳🇱 " + tl("オランダ","Netherlands")),
-            ("Sweden",         "🇸🇪 " + tl("スウェーデン","Sweden")),
-            ("Switzerland",    "🇨🇭 " + tl("スイス","Switzerland")),
-            ("Taiwan",         "🇹🇼 " + tl("台湾","Taiwan")),
-            ("Singapore",      "🇸🇬 " + tl("シンガポール","Singapore")),
-        ]
-        _pm_country_labels = [label for _, label in PM_COUNTRIES]
-        _pm_country_map    = {label: eng for eng, label in PM_COUNTRIES}
-
-        # ── 詳細フィルタ ──
-        with st.expander(tl("🔧 詳細フィルタ（著者・機関・国・年・出版タイプ・言語）",
-                            "🔧 Advanced Filters (Author / Affiliation / Country / Year / Type / Language)"),
-                         expanded=False):
-
-            fc1, fc2 = st.columns(2)
-            pm_author = fc1.text_input(
-                tl("👤 著者名 [au]","👤 Author [au]"),
-                key="s1_pm_author",
-                placeholder=tl("例: Yamamoto K","e.g. Yamamoto K")
-            )
-            pm_affil = fc2.text_input(
-                tl("🏷️ 所属施設 [ad]","🏷️ Affiliation [ad]"),
-                key="s1_pm_affil",
-                placeholder=tl("例: Tohoku University","e.g. Tohoku University")
-            )
-
-            pm_year_enabled = st.toggle(
-                tl("📅 年フィルタを有効にする","📅 Enable year filter"),
-                value=False,
-                key="s1_pm_year_enabled"
-            )
-            if pm_year_enabled:
-                yc1, yc2 = st.columns(2)
-                pm_year_from = yc1.number_input(
-                    tl("開始年","Year from"),
-                    min_value=1900, max_value=2026, value=2015, step=1,
-                    key="s1_pm_year_from"
-                )
-                pm_year_to = yc2.number_input(
-                    tl("終了年","Year to"),
-                    min_value=1900, max_value=2026, value=2026, step=1,
-                    key="s1_pm_year_to"
-                )
-            else:
-                pm_year_from = st.session_state.get("s1_pm_year_from", 2015)
-                pm_year_to   = st.session_state.get("s1_pm_year_to",   2026)
-
-            PM_PUB_TYPES = [
-                "Journal Article", "Review", "Systematic Review",
-                "Meta-Analysis", "Clinical Trial",
-                "Randomized Controlled Trial", "Case Reports",
-                "Comparative Study", "Editorial", "Letter",
-            ]
-            pm_pub_types = st.multiselect(
-                tl("📄 出版タイプ [pt]（複数選択可）","📄 Publication Type [pt] (multi-select)"),
-                PM_PUB_TYPES,
-                key="s1_pm_pub_types"
-            )
-
-            pm_lang_label = st.selectbox(
-                tl("🌐 言語 [la]","🌐 Language [la]"),
-                list(PM_LANGUAGES.keys()),
-                key="s1_pm_lang"
-            )
-            pm_lang = PM_LANGUAGES[pm_lang_label]
-
-            pm_country_labels = st.multiselect(
-                tl("🌏 国フィルタ [ad]（複数選択可・OR検索）",
-                   "🌏 Country filter [ad] (multi-select, OR search)"),
-                _pm_country_labels,
-                key="s1_pm_countries"
-            )
-            if pm_country_labels:
-                st.caption(tl(
-                    "※ 著者所属テキスト（[ad]）に国名が含まれる論文を絞り込みます。",
-                    "※ Filters papers where the author affiliation text [ad] contains the country name."
-                ))
-
-        # ── クエリ組み立て ──
-        def build_pubmed_query():
-            parts = []
-            kw = st.session_state.get("s1_pm_kw", "").strip()
-            field_tag = PM_FIELD_OPTIONS.get(
-                st.session_state.get("s1_pm_field",
-                    tl("全フィールド（PubMed標準）","All Fields (PubMed default)")), ""
-            )
-            if kw:
-                # フレーズ検索：スペースあり → クォート付き
-                kw_q = f'"{kw}"' if " " in kw else kw
-                parts.append(f"{kw_q}{field_tag}" if field_tag else kw_q)
-            author = st.session_state.get("s1_pm_author", "").strip()
-            if author:
-                parts.append(f'"{author}"[Author]')
-            affil = st.session_state.get("s1_pm_affil", "").strip()
-            if affil:
-                parts.append(f'"{affil}"[Affiliation]')
-            # 年フィルタ：トグルONの時のみ付加
-            if st.session_state.get("s1_pm_year_enabled", False):
-                yf = st.session_state.get("s1_pm_year_from", 2015)
-                yt = st.session_state.get("s1_pm_year_to",   2026)
-                parts.append(f"{yf}:{yt}[dp]")
-            for pt in st.session_state.get("s1_pm_pub_types", []):
-                parts.append(f'"{pt}"[pt]')
-            lang = PM_LANGUAGES.get(
-                st.session_state.get("s1_pm_lang", tl("指定なし","Any")), ""
-            )
-            if lang:
-                parts.append(f"{lang}[la]")
-            # 国フィルタ：複数選択時はOR結合
-            sel_country_labels = st.session_state.get("s1_pm_countries", [])
-            if sel_country_labels:
-                country_terms = [f'"{_pm_country_map[lb]}"[Affiliation]'
-                                 for lb in sel_country_labels if lb in _pm_country_map]
-                if len(country_terms) == 1:
-                    parts.append(country_terms[0])
-                elif country_terms:
-                    parts.append("(" + " OR ".join(country_terms) + ")")
-            return " AND ".join(parts)
-
-        pm_query = build_pubmed_query()
-
-        # ── クエリプレビュー ──
-        if pm_query:
-            with st.expander(tl("🔍 送信クエリ（確認用）","🔍 Query preview (debug)"), expanded=False):
-                st.code(pm_query, language="text")
-
-        # ── 件数確認 ──
         pm_max = st.slider(tl("最大取得件数","Max papers"), 50, 2000, 500, 50, key="s1_pm_max")
-
-        col_cnt_pm, col_run_pm = st.columns([1, 2])
-        with col_cnt_pm:
-            if st.button(tl("🔢 件数を確認","🔢 Check count"),
-                         disabled=not pm_query, use_container_width=True, key="s1_pm_cnt_btn"):
-                with st.spinner(tl("件数を取得中...","Counting...")):
-                    try:
-                        r_cnt = requests.get(
-                            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-                            params={"db": "pubmed", "term": pm_query,
-                                    "rettype": "count", "retmode": "json"},
-                            timeout=15
-                        )
-                        cnt = int(r_cnt.json().get("esearchresult", {}).get("count", 0))
-                        st.session_state["s1_pm_count"] = cnt
-                    except Exception:
-                        st.session_state["s1_pm_count"] = -1
-
-        if "s1_pm_count" in st.session_state:
-            cnt = st.session_state["s1_pm_count"]
-            if cnt < 0:
-                st.warning(tl("件数取得失敗","Failed to get count"))
-            elif cnt == 0:
-                st.warning(tl("⚠️ 該当論文なし","⚠️ No papers found"))
-            elif cnt < 200:
-                st.warning(tl(f"📄 {cnt:,}件 — 少なめ", f"📄 {cnt:,} papers — few"))
-            elif cnt <= 3000:
-                st.success(tl(f"📄 {cnt:,}件 — 良好", f"📄 {cnt:,} papers — good"))
-            else:
-                st.info(tl(f"📄 {cnt:,}件 — 多め（取得上限: {pm_max}件）",
-                           f"📄 {cnt:,} papers — many (fetch limit: {pm_max})"))
 
         def _auto_dataset_name_pm():
             base = st.session_state.get("s1_pm_kw", "") or "pubmed_dataset"
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
             return re.sub(r"[^\w]", "_", base)[:25] + "_" + ts
 
-        with col_run_pm:
-            if st.button(
-                tl("▶ PubMedを検索してデータを保存","▶ Search PubMed & Save"),
-                type="primary", use_container_width=True, key="s1_pm_run_btn",
-                disabled=not pm_query
-            ):
-                with st.spinner(tl("PubMedを検索中...","Searching PubMed...")):
-                    pm_works = fetch_works_pubmed(pm_query, pm_max)
-                if pm_works:
-                    pm_name = _auto_dataset_name_pm()
-                    pm_meta = {
-                        "keyword": pm_kw,
-                        "query": pm_query,
-                        "source": "pubmed",
-                        "max_papers": pm_max,
-                    }
-                    pm_path = save_dataset(pm_name, pm_works, pm_meta)
-                    st.success(tl(f"✅ {len(pm_works):,}件保存 → {pm_path}",
-                                  f"✅ {len(pm_works):,} papers saved → {pm_path}"))
-                    st.session_state["loaded_dataset"] = pm_name
-                    st.session_state["loaded_works"] = pm_works
-                    st.subheader(tl("プレビュー（上位5件）","Preview (top 5)"))
-                    for w in pm_works[:5]:
-                        title   = w.get("title","") or ""
-                        year    = str(w.get("publication_year","") or "")
-                        doi     = w.get("doi","") or ""
-                        journal = w.get("_journal","") or ""
-                        authors = [a.get("author",{}).get("display_name","")
-                                   for a in w.get("authorships",[])[:2]]
-                        affils  = []
-                        for a in w.get("authorships",[])[:1]:
-                            for inst in a.get("institutions",[])[:1]:
-                                affils.append(inst.get("display_name",""))
-                        st.markdown(f"**{title[:80]}**")
-                        st.caption(
-                            "  |  ".join(filter(None, [
-                                year,
-                                ", ".join(filter(None, authors)),
-                                affils[0][:50] if affils else "",
-                                journal,
-                                f"[DOI]({doi})" if doi else "",
-                            ]))
-                        )
-                        st.markdown("---")
-                else:
-                    st.warning(tl("該当なし","No results found"))
+        if st.button(
+            tl("▶ PubMedを検索してデータを保存","▶ Search PubMed & Save"),
+            type="primary", use_container_width=True,
+            disabled=not pm_kw.strip()
+        ):
+            with st.spinner(tl("PubMedを検索中...","Searching PubMed...")):
+                pm_works = fetch_works_pubmed(pm_kw.strip(), pm_max)
+            if pm_works:
+                pm_name = _auto_dataset_name_pm()
+                pm_meta = {
+                    "keyword": pm_kw,
+                    "source": "pubmed",
+                    "max_papers": pm_max,
+                }
+                pm_path = save_dataset(pm_name, pm_works, pm_meta)
+                st.success(tl(f"✅ {len(pm_works):,}件保存 → {pm_path}",
+                              f"✅ {len(pm_works):,} papers saved → {pm_path}"))
+                st.session_state["loaded_dataset"] = pm_name
+                st.session_state["loaded_works"] = pm_works
+                st.subheader(tl("プレビュー（上位5件）","Preview (top 5)"))
+                for w in pm_works[:5]:
+                    title = w.get("title","") or ""
+                    year  = str(w.get("publication_year","") or "")
+                    doi   = w.get("doi","") or ""
+                    authors = [a.get("author",{}).get("display_name","") for a in w.get("authorships",[])[:2]]
+                    st.markdown(f"**{title[:80]}**")
+                    st.caption(year + "  |  " + ", ".join(filter(None, authors)) +
+                               (f"  |  [DOI]({doi})" if doi else ""))
+                    st.markdown("---")
+            else:
+                st.warning(tl("該当なし","No results found"))
 
     if data_source == "PubMed":
         # PubMed モードでは以下のOpenAlex専用UIは不要
@@ -1898,95 +1189,26 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             "Lens.org APIを使って特許を検索し、NPL（非特許文献）引用からOpenAlexで論文を照合します。",
             "Search patents via Lens.org API and resolve NPL (non-patent literature) citations to papers via OpenAlex."
         ))
-        # APIキーはサイドバーの「⚙️ API 設定」から取得
-        lens_api_key = st.session_state.get("lens_api_key", "")
-        if not lens_api_key:
-            st.warning(tl(
-                "⚠️ Lens.org APIキーが未設定です。左サイドバーの「⚙️ API 設定」から入力してください。",
-                "⚠️ Lens.org API Key not set. Please enter it in '⚙️ API Settings' in the sidebar."
-            ))
-        else:
-            st.success(tl("✅ Lens.org APIキー設定済み（サイドバーで変更可能）",
-                          "✅ Lens.org API Key configured (changeable in sidebar)"))
+        lens_api_key = st.text_input(
+            tl("Lens.org APIキー", "Lens.org API Key"),
+            type="password",
+            key="lens_api_key",
+            placeholder=tl("Lens.orgで発行したトークンを入力", "Enter your Lens.org token"),
+        )
         lens_keyword = st.text_input(
-            tl("🔍 検索キーワード（タイトル・抄録・クレーム）", "🔍 Keyword (Title / Abstract / Claim)"),
+            tl("検索キーワード", "Search keyword"),
             key="lens_keyword",
             placeholder=tl("例: CRISPR gene editing", "e.g. CRISPR gene editing"),
         )
-
-        # ── 詳細フィルタ ──
-        with st.expander(tl("🔧 詳細フィルタ（発明者・出願人・年・IPC・国・タイプ）",
-                            "🔧 Advanced Filters (Inventor / Applicant / Year / IPC / Country / Type)"),
-                         expanded=False):
-
-            lf_c1, lf_c2 = st.columns(2)
-            lens_inventor = lf_c1.text_input(
-                tl("👤 発明者名 (inventor.name)", "👤 Inventor name"),
-                key="lens_inventor",
-                placeholder=tl("例: Zhang Feng", "e.g. Zhang Feng"),
-            )
-            lens_applicant = lf_c2.text_input(
-                tl("🏢 出願人/機関 (applicant.name)", "🏢 Applicant / Assignee"),
-                key="lens_applicant",
-                placeholder=tl("例: Broad Institute", "e.g. Broad Institute"),
-            )
-
-            ly_c1, ly_c2 = st.columns(2)
-            lens_year_from = ly_c1.number_input(
-                tl("📅 開始年", "📅 Year from"),
-                min_value=1900, max_value=2026, value=2010, step=1,
-                key="lens_year_from",
-            )
-            lens_year_to = ly_c2.number_input(
-                tl("📅 終了年", "📅 Year to"),
-                min_value=1900, max_value=2026, value=2026, step=1,
-                key="lens_year_to",
-            )
-
-            lens_ipc = st.text_input(
-                tl("🏷️ IPC分類コード（前方一致）", "🏷️ IPC Classification Code (prefix match)"),
-                key="lens_ipc",
-                placeholder=tl("例: A61K（医薬品）、C12N（微生物・遺伝子）、H04L（通信）",
-                               "e.g. A61K (pharmaceuticals), C12N (genetics), H04L (communications)"),
-            )
-
-            JURISDICTIONS = {
-                "JP 🇯🇵": "JP", "US 🇺🇸": "US", "EP 🇪🇺": "EP",
-                "WO (PCT) 🌐": "WO", "CN 🇨🇳": "CN", "KR 🇰🇷": "KR",
-                "DE 🇩🇪": "DE", "GB 🇬🇧": "GB", "FR 🇫🇷": "FR",
-                "AU 🇦🇺": "AU", "CA 🇨🇦": "CA",
-            }
-            lens_juris_labels = st.multiselect(
-                tl("🌏 出願国/管轄（複数選択可）", "🌏 Jurisdiction (multi-select)"),
-                list(JURISDICTIONS.keys()),
-                key="lens_jurisdictions",
-            )
-            lens_juris_codes = [JURISDICTIONS[lb] for lb in lens_juris_labels]
-
-            DOC_TYPES = {
-                tl("指定なし", "Any"): [],
-                tl("登録済み特許のみ", "Granted patents only"): ["granted_patent"],
-                tl("出願公開のみ", "Applications only"): ["patent_application"],
-                tl("両方", "Both"): ["granted_patent", "patent_application"],
-            }
-            lens_doc_type_label = st.selectbox(
-                tl("📄 特許タイプ", "📄 Patent type"),
-                list(DOC_TYPES.keys()),
-                key="lens_doc_type",
-            )
-            lens_doc_types = DOC_TYPES[lens_doc_type_label]
-
-            lens_npl_only = st.toggle(
-                tl("NPL引用あり特許のみ（論文との紐付けに必要）",
-                   "NPL-citing patents only (required for paper linkage)"),
-                value=True,
-                key="lens_npl_only",
-            )
-
         lens_max = st.slider(
             tl("取得特許数", "Max patents to fetch"),
             min_value=10, max_value=200, value=50, step=10,
             key="lens_max",
+        )
+        lens_inventor = st.text_input(
+            tl("発明者名（任意）", "Inventor name (optional)"),
+            key="lens_inventor",
+            placeholder=tl("例: Zhang Feng", "e.g. Zhang Feng"),
         )
 
         _lens_search_disabled = not (lens_api_key.strip() and lens_keyword.strip())
@@ -1997,24 +1219,21 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             key="lens_search_btn",
         ):
             with st.spinner(tl("Lens.orgで特許を検索中...", "Searching patents on Lens.org...")):
-                _patents = fetch_patents_lens(
-                    lens_keyword.strip(),
-                    lens_api_key.strip(),
-                    lens_max,
-                    inventor_filter=lens_inventor.strip(),
-                    applicant_filter=lens_applicant.strip(),
-                    year_from=lens_year_from,
-                    year_to=lens_year_to,
-                    ipc_code=lens_ipc.strip(),
-                    jurisdictions=lens_juris_codes if lens_juris_codes else None,
-                    doc_types=lens_doc_types if lens_doc_types else None,
-                    npl_only=lens_npl_only,
-                )
+                _patents = fetch_patents_lens(lens_keyword.strip(), lens_api_key.strip(), lens_max, inventor_filter=lens_inventor.strip())
 
             if not _patents:
                 st.warning(tl("特許が見つかりませんでした。キーワードやAPIキーを確認してください。",
                                "No patents found. Check your keyword and API key."))
             else:
+                # Filter by inventor name if provided
+                if lens_inventor.strip():
+                    _inv_lower = lens_inventor.strip().lower()
+                    _patents = [p for p in _patents if any(
+                        _inv_lower in inv.lower() for inv in p.get("inventors", [])
+                    )]
+                    st.caption(tl(f"発明者フィルタ後: {len(_patents)}件",
+                                  f"After inventor filter: {len(_patents)} patents"))
+
                 # Collect all NPL citations
                 _all_npls = []
                 for pat in _patents:
@@ -2035,15 +1254,13 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                     f"Found {len(_patents)} patents / {len(_unique_npls)} unique NPL citations"
                 ))
 
-                if lens_npl_only and _unique_npls:
-                    with st.spinner(tl("NPL引用をOpenAlexで照合中...", "Resolving NPL citations via OpenAlex...")):
-                        _resolved_works = resolve_npl_to_works(_unique_npls)
-                    st.success(tl(
-                        f"✅ {len(_resolved_works)}件の論文を照合しました",
-                        f"✅ Resolved {len(_resolved_works)} papers"
-                    ))
-                else:
-                    _resolved_works = []
+                with st.spinner(tl("NPL引用をOpenAlexで照合中...", "Resolving NPL citations via OpenAlex...")):
+                    _resolved_works = resolve_npl_to_works(_unique_npls)
+
+                st.success(tl(
+                    f"✅ {len(_resolved_works)}件の論文を照合しました",
+                    f"✅ Resolved {len(_resolved_works)} papers"
+                ))
 
                 # Save dataset
                 _lens_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -2051,14 +1268,6 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                 _lens_meta = {
                     "source": "lens_patent",
                     "query": lens_keyword.strip(),
-                    "inventor": lens_inventor.strip(),
-                    "applicant": lens_applicant.strip(),
-                    "year_from": lens_year_from,
-                    "year_to": lens_year_to,
-                    "ipc_code": lens_ipc.strip(),
-                    "jurisdictions": lens_juris_codes,
-                    "doc_types": lens_doc_types,
-                    "npl_only": lens_npl_only,
                     "max_patents": lens_max,
                     "n_patents": len(_patents),
                     "n_resolved_works": len(_resolved_works),
@@ -2084,22 +1293,12 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                 st.subheader(tl("特許プレビュー（上位5件）", "Patent Preview (top 5)"))
                 for pat in _patents[:5]:
                     st.markdown(f"**{pat.get('title', 'No title')[:80]}**")
-                    _inv_str  = ", ".join(pat.get("inventors", [])[:3])
-                    _app_str  = ", ".join(pat.get("applicants", [])[:2])
-                    _ipc_str  = ", ".join(pat.get("ipc_codes", [])[:3])
-                    _npl_n    = len(pat.get("npl_citations", []))
-                    _juris    = pat.get("jurisdiction", "")
-                    _dtype    = pat.get("doc_type", "")
-                    st.caption("  |  ".join(filter(None, [
-                        pat.get("date_published","")[:10],
-                        f"👤 {_inv_str}" if _inv_str else "",
-                        f"🏢 {_app_str}" if _app_str else "",
-                        f"🏷️ {_ipc_str}" if _ipc_str else "",
-                        f"🌏 {_juris}" if _juris else "",
-                        f"📄 {_dtype}" if _dtype else "",
-                        f"NPL引用: {_npl_n}件",
-                        f"ID: {pat.get('lens_id','')}",
-                    ])))
+                    _inv_str = ", ".join(pat.get("inventors", [])[:3])
+                    _npl_n = len(pat.get("npl_citations", []))
+                    st.caption(
+                        f"{pat.get('date_published','')[:10]}  |  {_inv_str}"
+                        f"  |  NPL引用: {_npl_n}件  |  ID: {pat.get('lens_id','')}"
+                    )
                     st.markdown("---")
 
         st.stop()
@@ -2123,84 +1322,44 @@ if tl("① データ収集・保存","① Collect & Save") in step:
         col_browse, col_selected = st.columns([3, 1])
 
         with col_browse:
-            # ── Step 1: Domain（4つをラジオで表示）──
-            domains_list = sorted(set(
-                t_["domain"]["display_name"] for t_ in topics_all if t_.get("domain")
-            ))
-            sel_domain = st.radio(
-                tl("Step 1｜ドメインを選択","Step 1｜Select Domain"),
-                domains_list,
-                horizontal=True,
-                key="s1_domain",
-            )
-            by_domain = [t_ for t_ in topics_all
-                         if t_.get("domain", {}).get("display_name") == sel_domain]
+            # 階層フィルタ
+            b_col1, b_col2, b_col3 = st.columns(3)
+            domains = [all_label] + sorted(set(t_["domain"]["display_name"] for t_ in topics_all if t_.get("domain")))
+            sel_domain = b_col1.selectbox("Domain", domains, key="s1_domain")
+            filtered = topics_all
+            if sel_domain != all_label:
+                filtered = [t_ for t_ in filtered if t_.get("domain",{}).get("display_name") == sel_domain]
 
-            st.markdown("---")
-
-            # ── Step 2: Field ──
-            fields_list = sorted(set(
-                t_["field"]["display_name"] for t_ in by_domain if t_.get("field")
-            ))
-            sel_field = st.selectbox(
-                tl("Step 2｜フィールドを選択","Step 2｜Select Field"),
-                [all_label] + fields_list,
-                key="s1_field",
-            )
-            by_field = ([t_ for t_ in by_domain
-                         if t_.get("field", {}).get("display_name") == sel_field]
-                        if sel_field != all_label else by_domain)
-
-            # ── Step 3: Subfield（Field選択後のみ表示）──
+            fields = [all_label] + sorted(set(t_["field"]["display_name"] for t_ in filtered if t_.get("field")))
+            sel_field = b_col2.selectbox("Field", fields, key="s1_field")
             if sel_field != all_label:
-                subfields_list = sorted(set(
-                    t_["subfield"]["display_name"] for t_ in by_field if t_.get("subfield")
-                ))
-                sel_sub = st.selectbox(
-                    tl("Step 3｜サブフィールドを選択","Step 3｜Select Subfield"),
-                    [all_label] + subfields_list,
-                    key="s1_sub",
-                )
-                by_sub = ([t_ for t_ in by_field
-                           if t_.get("subfield", {}).get("display_name") == sel_sub]
-                          if sel_sub != all_label else [])
-            else:
-                sel_sub = all_label
-                by_sub  = []
+                filtered = [t_ for t_ in filtered if t_.get("field",{}).get("display_name") == sel_field]
 
-            # ── Step 4: Topics（Subfield選択後のみ表示）──
-            if sel_sub != all_label and by_sub:
-                st.markdown("---")
-                topic_filter_kw = st.text_input(
-                    tl("トピック名で絞り込み（任意）","Filter topics by name (optional)"),
-                    key="s1_tf",
-                    placeholder=tl("例: cancer, battery","e.g. cancer, battery"),
-                )
-                filtered = ([t_ for t_ in by_sub
-                             if topic_filter_kw.lower() in t_["display_name"].lower()]
-                            if topic_filter_kw else by_sub)
+            subfields = [all_label] + sorted(set(t_["subfield"]["display_name"] for t_ in filtered if t_.get("subfield")))
+            sel_sub = b_col3.selectbox("Subfield", subfields, key="s1_sub")
+            if sel_sub != all_label:
+                filtered = [t_ for t_ in filtered if t_.get("subfield",{}).get("display_name") == sel_sub]
 
-                st.caption(f"**{len(filtered)}** " + tl("件のトピック（チェックで選択）","topics — check to select"))
-                for t_ in filtered[:150]:
-                    tid   = t_["id"].replace("https://openalex.org/T", "")
-                    label = t_["display_name"]
-                    checked = label in st.session_state.s1_selected_topics
-                    if st.checkbox(label, value=checked, key="s1_cb_" + tid):
-                        if label not in st.session_state.s1_selected_topics:
-                            st.session_state.s1_selected_topics.append(label)
-                    else:
-                        if label in st.session_state.s1_selected_topics:
-                            st.session_state.s1_selected_topics.remove(label)
-            elif sel_field == all_label:
-                st.info(tl(
-                    "⬆ Step 2 でフィールドを選択してください",
-                    "⬆ Select a Field in Step 2 to continue"
-                ))
-            else:
-                st.info(tl(
-                    "⬆ Step 3 でサブフィールドを選択するとトピックが表示されます",
-                    "⬆ Select a Subfield in Step 3 to view Topics"
-                ))
+            topic_filter_kw = st.text_input(
+                tl("トピック名で絞り込み","Filter topics by name"),
+                key="s1_tf", placeholder=tl("例: battery, diabetes","e.g. battery, diabetes")
+            )
+            if topic_filter_kw:
+                filtered = [t_ for t_ in filtered if topic_filter_kw.lower() in t_["display_name"].lower()]
+
+            st.caption(f"**{len(filtered)}** " + tl("件のトピック（チェックで選択）","topics — check to select"))
+
+            # チェックボックス一覧
+            for t_ in filtered[:100]:
+                tid   = t_["id"].replace("https://openalex.org/T","")
+                label = t_["display_name"]
+                checked = label in st.session_state.s1_selected_topics
+                if st.checkbox(label, value=checked, key="s1_cb_"+tid):
+                    if label not in st.session_state.s1_selected_topics:
+                        st.session_state.s1_selected_topics.append(label)
+                else:
+                    if label in st.session_state.s1_selected_topics:
+                        st.session_state.s1_selected_topics.remove(label)
 
         with col_selected:
             st.markdown(tl("**✅ 選択済みトピック**","**✅ Selected Topics**"))
@@ -2213,39 +1372,6 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             else:
                 st.info(tl("まだ選択なし","None selected"))
 
-        # ── トピック名検索（キーワードで全件から直接検索）──
-        st.markdown("---")
-        st.markdown(tl("**🔍 トピック名で直接検索**","**🔍 Search Topics by Name**"))
-        st.caption(tl(
-            "ブラウズが難しい場合は、トピック名のキーワードで全件から直接検索できます。",
-            "If browsing is difficult, search all topics directly by keyword."
-        ))
-        _direct_kw = st.text_input(
-            tl("トピック名を入力","Enter topic name"),
-            key="s1_direct_search",
-            placeholder=tl("例: machine learning, cancer immunotherapy","e.g. machine learning, cancer immunotherapy"),
-        )
-        if _direct_kw:
-            _direct_results = [
-                t_ for t_ in topics_all
-                if _direct_kw.lower() in t_["display_name"].lower()
-            ]
-            st.caption(f"**{len(_direct_results)}** " + tl("件ヒット（チェックで選択）","results — check to select"))
-            for t_ in _direct_results[:100]:
-                _tid   = t_["id"].replace("https://openalex.org/T", "")
-                _label = t_["display_name"]
-                _dom   = t_.get("domain",  {}).get("display_name", "")
-                _fld   = t_.get("field",   {}).get("display_name", "")
-                _sub   = t_.get("subfield",{}).get("display_name", "")
-                _path  = " › ".join(p for p in [_dom, _fld, _sub] if p)
-                _checked = _label in st.session_state.s1_selected_topics
-                if st.checkbox(f"{_label}　　`{_path}`", value=_checked, key="s1_ds_" + _tid):
-                    if _label not in st.session_state.s1_selected_topics:
-                        st.session_state.s1_selected_topics.append(_label)
-                else:
-                    if _label in st.session_state.s1_selected_topics:
-                        st.session_state.s1_selected_topics.remove(_label)
-
     # ══════════════════════════════════════════
     # STEP B: キーワード・著者・機関で絞り込み（任意）
     # ══════════════════════════════════════════
@@ -2253,11 +1379,10 @@ if tl("① データ収集・保存","① Collect & Save") in step:
     st.subheader(tl("② キーワード・著者・機関で絞り込む（任意）",
                     "② Narrow by Keyword / Author / Institution (optional)"))
 
-    tab_kw, tab_author, tab_inst, tab_affil = st.tabs([
+    tab_kw, tab_author, tab_inst = st.tabs([
         tl("📝 キーワード","📝 Keyword"),
         tl("👤 著者名","👤 Author"),
         tl("🏢 機関名","🏢 Institution"),
-        tl("🏷️ 所属施設","🏷️ Affiliation"),
     ])
 
     with tab_kw:
@@ -2344,7 +1469,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                 try:
                     _r = requests.get(
                         f"https://api.openalex.org/institutions/{_ror_full}",
-                        params={"mailto": _oa_email()}, timeout=10
+                        params={"mailto": "research@example.com"}, timeout=10
                     )
                     _inst_data = _r.json()
                     _inst_name = _inst_data.get("display_name", "")
@@ -2396,23 +1521,6 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             if st.button(tl("クリア","Clear"), key="s1_ci"):
                 st.session_state.s1_org_ror_id = None
                 st.session_state.s1_org_name   = ""
-                st.rerun()
-
-    with tab_affil:
-        st.caption(tl(
-            "著者の所属施設名をテキストで直接入力して絞り込みます。"
-            "ROR IDは不要です。部分一致で検索されます。",
-            "Filter papers by author affiliation name (text search, partial match). No ROR ID needed."
-        ))
-        affil_kw = st.text_input(
-            tl("所属施設名","Affiliation name"),
-            key="s1_affiliation_kw",
-            placeholder=tl("例: 東京大学, Tohoku University","e.g. Tokyo, Tohoku University")
-        )
-        if affil_kw:
-            st.success(f"✅ {tl('所属施設フィルタ：','Affiliation filter:')} {affil_kw}")
-            if st.button(tl("クリア","Clear"), key="s1_affil_clear"):
-                st.session_state.s1_affiliation_kw = ""
                 st.rerun()
 
     # ══════════════════════════════════════════
@@ -2497,8 +1605,6 @@ if tl("① データ収集・保存","① Collect & Save") in step:
         summary.append(tl("👤 著者: ","👤 Author: ") + ", ".join(st.session_state.s1_ego_author_names))
     if st.session_state.s1_org_ror_id:
         summary.append(tl("🏢 機関: ","🏢 Institution: ") + st.session_state.s1_org_name)
-    if st.session_state.get("s1_affiliation_kw",""):
-        summary.append(tl("🏷️ 所属施設: ","🏷️ Affiliation: ") + st.session_state.s1_affiliation_kw)
     if st.session_state.get("s1_freekw",""):
         summary.append(tl("📝 キーワード: ","📝 Keyword: ") + st.session_state.s1_freekw)
     if sel_country_codes:
@@ -2523,8 +1629,6 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             ror = st.session_state.s1_org_ror_id
             if not ror.startswith("https://ror.org/"): ror = "https://ror.org/" + ror
             f.append("authorships.institutions.ror:" + ror)
-        if st.session_state.get("s1_affiliation_kw",""):
-            f.append("authorships.institutions.display_name.search:" + st.session_state.s1_affiliation_kw)
         if st.session_state.get("s1_freekw","") and not st.session_state.s1_selected_topics:
             f.append("title.search:" + st.session_state.s1_freekw)
         f.append("publication_year:" + str(year_from) + "-" + str(year_to))
@@ -2538,8 +1642,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
         st.session_state.s1_selected_topics or
         st.session_state.s1_ego_author_ids or
         st.session_state.s1_org_ror_id or
-        st.session_state.get("s1_freekw","") or
-        st.session_state.get("s1_affiliation_kw","")
+        st.session_state.get("s1_freekw","")
     )
 
     # 件数確認ボタン
@@ -2553,7 +1656,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                     r = requests.get(
                         "https://api.openalex.org/works",
                         params={"filter": ",".join(f), "per_page": 1,
-                                "select": "id", "mailto": _oa_email()},
+                                "select": "id", "mailto": "vos@example.com"},
                         timeout=15)
                     count = r.json().get("meta",{}).get("count", 0)
                     st.session_state["s1_count_result"] = count
@@ -2598,7 +1701,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
 
             dataset_name = _auto_dataset_name()
             with st.spinner(tl("OpenAlexを検索中...","Searching OpenAlex...")):
-                works = fetch_works(filters, per_page, mailto=_oa_email())
+                works = fetch_works(filters, per_page)
 
             if works:
                 path = save_dataset(dataset_name, works, meta_info)
@@ -2624,7 +1727,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
 # ════════════════════════════════════════════
 # ステップ2: 分析・可視化
 # ════════════════════════════════════════════
-elif tl("② 分析・可視化","② Analyze & Visualize") in step:
+else:
     st.header(tl("🔬 ステップ2: 分析・可視化","🔬 Step 2: Analyze & Visualize"))
 
     # データセット選択
@@ -2662,12 +1765,12 @@ elif tl("② 分析・可視化","② Analyze & Visualize") in step:
 
 | # | シナリオ | 推奨手法 | ステップ |
 |---|----------|----------|----------|
-| 1 | **研究コミュニティの把握** 誰が中心的な研究者か、どのグループが存在するか | 共著ネットワーク → 中心性ランキング | Step2 |
-| 2 | **研究トレンドの発見** どのトピックが急成長しているか | BERTopic / K-means クラスタリング → ホワイトスペース可視化 | Step2 |
-| 3 | **ホワイトスペース（空白領域）の特定** 論文数が少なく引用が高いニッチ分野を発見 | BERTopic / K-means → ホワイトスペース散布図 | Step2 |
-| 4 | **国際動向の比較** どの国が主導しているか | 国別論文数グラフ（Step2） + 国フィルタ（Step1） | Step1+2 |
-| 5 | **重要論文・ハブの特定** 最も影響力のある論文・研究者は誰か | KeyBERT共起 → PageRankランキング + 重要論文ランキング | Step2 |
-| 6 | **研究費対効果の評価** 助成金と論文アウトカムの関係 | KAKEN分析 + 重要論文の被引用数（費用対効果の推定） | Step2+3 |
+| 1 | **研究コミュニティの把握**<br>誰が中心的な研究者か、どのグループが存在するか | 共著ネットワーク → 中心性ランキング | Step2 |
+| 2 | **研究トレンドの発見**<br>どのトピックが急成長しているか | BERTopic / K-means クラスタリング → ホワイトスペース可視化 | Step2 |
+| 3 | **ホワイトスペース（空白領域）の特定**<br>論文数が少なく引用が高いニッチ分野を発見 | BERTopic / K-means → ホワイトスペース散布図 | Step2 |
+| 4 | **国際動向の比較**<br>どの国が主導しているか | 国別論文数グラフ（Step2） + 国フィルタ（Step1） | Step1+2 |
+| 5 | **重要論文・ハブの特定**<br>最も影響力のある論文・研究者は誰か | KeyBERT共起 → PageRankランキング + 重要論文ランキング | Step2 |
+| 6 | **研究費対効果の評価**<br>助成金と論文アウトカムの関係 | KAKEN分析 + 重要論文の被引用数（費用対効果の推定） | Step2+3 |
 
 > 💡 **ヒント**: シナリオ3の「ホワイトスペース」は BERTopic または K-means 実行後に自動表示されます。
 """,
@@ -2675,12 +1778,12 @@ elif tl("② 分析・可視化","② Analyze & Visualize") in step:
 
 | # | Scenario | Recommended Features | Step |
 |---|----------|----------------------|------|
-| 1 | **Map the research community** Who are the key researchers? What groups exist? | Co-authorship network → Centrality ranking | Step 2 |
-| 2 | **Discover research trends** Which topics are growing fast? | BERTopic / K-means clustering → White Space viz | Step 2 |
-| 3 | **Identify white spaces** Find niches with few papers but high citation impact | BERTopic / K-means → White Space scatter plot | Step 2 |
-| 4 | **International comparison** Which countries lead the field? | Papers-by-country chart (Step 2) + country filter (Step 1) | Step 1+2 |
-| 5 | **Find key papers & hubs** Most influential papers and researchers | KeyBERT co-occurrence → PageRank + Key Papers ranking | Step 2 |
-| 6 | **Evaluate research funding ROI** Relationship between grants and publication outcomes | KAKEN analysis + citation counts (funding cost per citation) | Step 2+3 |
+| 1 | **Map the research community**<br>Who are the key researchers? What groups exist? | Co-authorship network → Centrality ranking | Step 2 |
+| 2 | **Discover research trends**<br>Which topics are growing fast? | BERTopic / K-means clustering → White Space viz | Step 2 |
+| 3 | **Identify white spaces**<br>Find niches with few papers but high citation impact | BERTopic / K-means → White Space scatter plot | Step 2 |
+| 4 | **International comparison**<br>Which countries lead the field? | Papers-by-country chart (Step 2) + country filter (Step 1) | Step 1+2 |
+| 5 | **Find key papers & hubs**<br>Most influential papers and researchers | KeyBERT co-occurrence → PageRank + Key Papers ranking | Step 2 |
+| 6 | **Evaluate research funding ROI**<br>Relationship between grants and publication outcomes | KAKEN analysis + citation counts (funding cost per citation) | Step 2+3 |
 
 > 💡 **Tip**: The "White Space" scatter plot for Scenario 3 appears automatically after running BERTopic or K-means analysis.
 """
@@ -2699,7 +1802,6 @@ elif tl("② 分析・可視化","② Analyze & Visualize") in step:
             tl("BERTopic クラスタリング","BERTopic Clustering"),
             tl("K-means クラスタリング","K-means Clustering"),
             tl("引用分析","Citation Analysis"),
-            tl("🌳 引用系譜（3世代）","🌳 Citation Genealogy (3 Generations)"),
         ])
 
         # 手法説明
@@ -2779,28 +1881,13 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
 - Kessler, M. M. (1963). Bibliographic coupling between scientific papers. *American Documentation*, 14(1), 10–25. [DOI](https://doi.org/10.1002/asi.5090140103)
 - Small, H. (1973). Co-citation in the scientific literature. *JASIST*, 24(4), 265–269. [DOI](https://doi.org/10.1002/asi.4630240406)
 - Garfield, E. (1955). Citation indexes for science. *Science*, 122(3159), 108–111. [DOI](https://doi.org/10.1126/science.122.3159.108)"""),
-            tl("🌳 引用系譜（3世代）","🌳 Citation Genealogy (3 Generations)"): tl(
-                """選択した論文（第0世代）の参考文献リスト（第1世代）→ その参考文献（第2世代）→ さらにその参考文献（第3世代）を辿り、引用の系譜を有向グラフで可視化します。
-
-**世代ごとの色分け**
-🔵 第0世代（収集論文） 🟢 第1世代 🟡 第2世代 🔴 第3世代
-
-少数の重要論文・研究者グループの知識系譜把握に最適です。
-**注意**: OpenAlexデータが必要です（PubMed・Lens.orgでは利用不可）。論文数が多い場合は処理に時間がかかります。""",
-                """Traces backward citations from your selected papers (Gen 0) → their references (Gen 1) → those references' references (Gen 2) → and one level further (Gen 3), visualized as a directed graph.
-
-**Color by generation**
-🔵 Gen 0 (collected) 🟢 Gen 1 🟡 Gen 2 🔴 Gen 3
-
-Best suited for a small set of key papers to reveal the intellectual lineage of a research topic.
-**Note**: Requires OpenAlex data (not available for PubMed or Lens.org sources)."""),
         }
         if analysis_type in _method_info:
             with st.expander(tl("📖 この手法について","📖 About this method")):
                 st.markdown(_method_info[analysis_type])
 
         # 引用分析サブタイプ
-        if tl("引用分析","Citation Analysis") in analysis_type and tl("引用系譜","Citation Genealogy") not in analysis_type:
+        if tl("引用分析","Citation Analysis") in analysis_type:
             citation_type_label = st.radio(
                 tl("引用分析の種類","Citation analysis type"),
                 [tl("書誌結合 (Bibliographic Coupling)","Bibliographic Coupling"),
@@ -2811,85 +1898,6 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                              else "direct_citation")
         else:
             citation_type = "bibliographic_coupling"
-
-        # 引用系譜パラメータ
-        if tl("引用系譜","Citation Genealogy") in analysis_type:
-            st.markdown("---")
-            st.caption(tl(
-                "⚠️ OpenAlexデータ専用です。PubMed・Lens.orgでは参考文献データがないため使用できません。",
-                "⚠️ OpenAlex data only. PubMed and Lens.org do not provide reference lists."
-            ))
-
-            # ── 方向選択 ──
-            _dir_backward = tl("⬅ 引用系譜（過去を遡る）","⬅ Backward (traces references)")
-            _dir_forward  = tl("➡ 被引用系譜（将来を追う）","➡ Forward (traces citing papers)")
-            genealogy_direction_label = st.radio(
-                tl("系譜の方向","Genealogy direction"),
-                [_dir_backward, _dir_forward],
-                key="genealogy_direction",
-                help=tl(
-                    "⬅ 引用系譜: この論文が引用している論文を遡る（知識の源流）\n"
-                    "➡ 被引用系譜: この論文を引用している論文を追う（知識の波及）",
-                    "⬅ Backward: traces papers this work references (intellectual origins)\n"
-                    "➡ Forward: traces papers that cite this work (influence spread)"
-                )
-            )
-            genealogy_direction = "forward" if _dir_forward in genealogy_direction_label else "backward"
-
-            # ── 論文1本選択 ──
-            if works:
-                def _paper_label(w):
-                    _t  = (w.get("title", "") or w.get("id", ""))[:50]
-                    _y  = w.get("publication_year") or ""
-                    _c  = w.get("cited_by_count") or 0
-                    _yp = f"[{_y}]" if _y else ""
-                    _cp = f"被引用{_c}件" if lang == "ja" else f"cited {_c}"
-                    return f"{_yp} {_cp}  {_t}".strip()
-
-                _paper_options = {
-                    w.get("id", ""): _paper_label(w)
-                    for w in works if w.get("id")
-                }
-                _default_id = st.session_state.get("genealogy_seed_id", list(_paper_options.keys())[0])
-                if _default_id not in _paper_options:
-                    _default_id = list(_paper_options.keys())[0]
-                genealogy_seed_id = st.selectbox(
-                    tl("📄 起点論文を選択（1本）","📄 Select seed paper (1 paper)"),
-                    options=list(_paper_options.keys()),
-                    format_func=lambda k: _paper_options[k],
-                    index=list(_paper_options.keys()).index(_default_id),
-                    key="genealogy_seed_selectbox",
-                    help=tl(
-                        "この論文を起点として系譜を辿ります。",
-                        "Traces the citation genealogy from this paper."
-                    )
-                )
-                st.session_state["genealogy_seed_id"] = genealogy_seed_id
-            else:
-                genealogy_seed_id = None
-
-            genealogy_generations = st.slider(
-                tl("追跡世代数","Generations to trace"), 1, 3, 3,
-                key="genealogy_gen",
-                help=tl("多いほど深く辿れますが、API呼び出し回数が増加します。",
-                        "More generations = deeper trace, but more API calls.")
-            )
-            _ref_label = (
-                tl("1論文あたり最大被引用論文数","Max citing papers per paper")
-                if genealogy_direction == "forward"
-                else tl("1論文あたり最大参考文献数","Max references per paper")
-            )
-            genealogy_max_per_gen = st.slider(
-                _ref_label, 5, 50, 20,
-                key="genealogy_max_per_gen",
-                help=tl("各論文から辿る最大数。多いとグラフが巨大になります。",
-                        "Max papers to follow per paper. Higher = larger graph.")
-            )
-        else:
-            genealogy_generations  = 3
-            genealogy_max_per_gen  = 20
-            genealogy_seed_id      = None
-            genealogy_direction    = "backward"
 
         # モデル選択（BERT系手法のとき）
         keybert_types  = [tl("KeyBERT キーワード共起","KeyBERT Keyword Co-occurrence")]
@@ -2960,19 +1968,11 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
         # 可視化方法
         st.markdown("---")
         st.subheader(tl("📊 可視化方法","📊 Visualization"))
-        _is_genealogy = tl("引用系譜","Citation Genealogy") in analysis_type
-        if _is_genealogy:
-            viz_method = tl("アプリ内（インタラクティブ）","In-app (Interactive)")
-            st.info(tl(
-                "🌳 引用系譜はアプリ内表示のみ対応しています。",
-                "🌳 Citation Genealogy supports in-app display only."
-            ))
-        else:
-            viz_method = st.radio(tl("表示方法","Display method"), [
-                tl("アプリ内（インタラクティブ）","In-app (Interactive)"),
-                "VOSviewer JSON",
-                "Retina / Gephi (GEXF)",
-            ])
+        viz_method = st.radio(tl("表示方法","Display method"), [
+            tl("アプリ内（インタラクティブ）","In-app (Interactive)"),
+            "VOSviewer JSON",
+            "Retina / Gephi (GEXF)",
+        ])
 
         run_btn = st.button(tl("▶ 解析実行","▶ Run Analysis"),
                             type="primary", use_container_width=True)
@@ -2988,6 +1988,7 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                 vos_data = largest_connected_component(build_coauth(works, min_links))
 
         elif tl("KeyBERT","KeyBERT") in analysis_type:
+            from keybert import KeyBERT
             import html as _html
 
             _kw_cache_key = f"kw_{selected_ds}_{model_key}_{keybert_max_papers}"
@@ -3014,51 +2015,21 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                         _texts.append(text)
 
                 with st.spinner(tl(
-                    f"キーワード抽出中... {len(_texts)}件 [{model_name}]",
-                    f"Extracting keywords... {len(_texts)} papers [{model_name}]"
+                    f"KeyBERT でキーワード抽出中... {len(_texts)}件 [{model_name}]（バッチ処理）",
+                    f"Extracting keywords... {len(_texts)} papers [{model_name}] (batch)"
                 )):
-                    _st_err = None
-                    try:
-                        # sentence-transformers 直接呼び出し（KeyBERT 不使用）
-                        work_keywords = extract_keywords_with_st(
-                            _texts, _wids, model_key, top_n=5
-                        )
-                    except Exception as _st_err_caught:
-                        _st_err = _st_err_caught
-                        work_keywords = {wid: [] for wid in _wids}
+                    kw_model = KeyBERT(model=model_key)
+                    _all_kws = kw_model.extract_keywords(
+                        _texts, keyphrase_ngram_range=(1, 2), top_n=5
+                    )
 
+                work_keywords = {wid: [k for k, _ in kws]
+                                 for wid, kws in zip(_wids, _all_kws)}
                 st.session_state[_kw_cache_key] = work_keywords
-
-            _total_kws = sum(len(v) for v in work_keywords.values())
-            if _total_kws == 0:
-                # BERT 完全失敗 → TF-IDF で自動フォールバック
-                st.warning(tl(
-                    f"⚠️ {model_name} でキーワードを抽出できませんでした（sentence-transformers との互換性問題）。"
-                    "**TF-IDF** に自動切り替えして抽出します。",
-                    f"⚠️ {model_name} failed to extract keywords (sentence-transformers compatibility issue). "
-                    "Automatically switching to **TF-IDF** extraction."
-                ))
-                with st.spinner(tl("TF-IDF でキーワード抽出中...","Extracting keywords with TF-IDF...")):
-                    work_keywords = extract_keywords_tfidf(_texts, _wids, top_n=5)
-                st.session_state[_kw_cache_key] = work_keywords
-                _total_kws = sum(len(v) for v in work_keywords.values())
-                if _total_kws == 0:
-                    st.error(tl(
-                        "TF-IDF でも抽出できませんでした。テキストデータを確認してください。",
-                        "TF-IDF also failed. Please check the text data."
-                    ))
-                    st.stop()
-                st.success(tl(
-                    f"✅ TF-IDF でキーワード抽出完了: {_total_kws}語",
-                    f"✅ Keywords extracted via TF-IDF: {_total_kws}"
-                ))
-            else:
-                st.success(tl(
-                    f"キーワード抽出完了: {_total_kws}語 [{model_name}]",
-                    f"Keywords extracted: {_total_kws} [{model_name}]"
-                ))
             with st.spinner(tl("ネットワーク構築中...","Building network...")):
                 vos_data = largest_connected_component(build_keyword_cooccurrence(works, work_keywords, min_links))
+            st.success(tl(f"キーワード抽出完了: {sum(len(v) for v in work_keywords.values())}語 [{model_name}]",
+                          f"Keywords extracted: {sum(len(v) for v in work_keywords.values())} [{model_name}]"))
 
         elif tl("BERTopic","BERTopic") in analysis_type:
             with st.spinner(tl("BERTopicでクラスタリング中...","Running BERTopic clustering...")):
@@ -3073,55 +2044,6 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                     st.error(tl("BERTopicをインストールしてください: `pip install bertopic`",
                                 "Install BERTopic: `pip install bertopic`"))
                     st.stop()
-
-        elif tl("引用系譜","Citation Genealogy") in analysis_type:
-            _is_pubmed_src = any(w.get("_source") == "pubmed" for w in works)
-            if _is_pubmed_src:
-                st.error(tl(
-                    "⚠️ 引用系譜はOpenAlexデータ専用です。PubMedでは参考文献リストが取得できません。",
-                    "⚠️ Citation Genealogy requires OpenAlex data. PubMed does not provide reference lists."
-                ))
-                st.stop()
-            # 選択した1本のみを起点にする
-            _seed_id = genealogy_seed_id or (works[0].get("id","") if works else "")
-            _seed_works = [w for w in works if w.get("id","") == _seed_id]
-            if not _seed_works:
-                st.error(tl(
-                    "起点論文が見つかりませんでした。論文を選択し直してください。",
-                    "Seed paper not found. Please re-select a paper."
-                ))
-                st.stop()
-            _seed_title = (_seed_works[0].get("title","") or _seed_id)[:60]
-
-            if genealogy_direction == "forward":
-                _dir_ja, _dir_en = "被引用系譜", "forward citation genealogy"
-            else:
-                _dir_ja, _dir_en = "引用系譜", "backward citation genealogy"
-
-            with st.spinner(tl(
-                f"{_dir_ja}を構築中…「{_seed_title}」（最大{genealogy_generations}世代、各{genealogy_max_per_gen}件）",
-                f"Building {_dir_en} for '{_seed_title}' (up to {genealogy_generations} gen, {genealogy_max_per_gen}/paper)..."
-            )):
-                if genealogy_direction == "forward":
-                    _g_nodes, _g_edges = build_forward_citation_genealogy(
-                        _seed_works,
-                        generations=genealogy_generations,
-                        max_per_gen=genealogy_max_per_gen,
-                        mailto=_oa_email()
-                    )
-                else:
-                    _g_nodes, _g_edges = build_citation_genealogy(
-                        _seed_works,
-                        generations=genealogy_generations,
-                        max_per_gen=genealogy_max_per_gen,
-                        mailto=_oa_email()
-                    )
-            st.session_state["genealogy_nodes"]           = _g_nodes
-            st.session_state["genealogy_edges"]           = _g_edges
-            st.session_state["genealogy_seed_title"]      = _seed_title
-            st.session_state["genealogy_direction_value"] = genealogy_direction
-            st.session_state["analysis_type"]             = analysis_type
-            vos_data = None  # genealogy uses its own rendering
 
         elif tl("引用分析","Citation Analysis") in analysis_type:
             _ct_label = tl("書誌結合","Bibliographic Coupling") if citation_type == "bibliographic_coupling" else tl("直接引用","Direct Citation")
@@ -3141,126 +2063,19 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                     works, model_key, n_clusters, min_links)
                 vos_data = largest_connected_component(vos_data)
 
-        if vos_data is not None:
-            lcc_size = len(vos_data.get("items", []))
-            st.info(tl(f"最大連結成分: {lcc_size} ノードを表示（孤立クラスターを除外）",
-                       f"Largest connected component: {lcc_size} nodes (isolated clusters excluded)"))
+        lcc_size = len(vos_data.get("items", []))
+        st.info(tl(f"最大連結成分: {lcc_size} ノードを表示（孤立クラスターを除外）",
+                   f"Largest connected component: {lcc_size} nodes (isolated clusters excluded)"))
 
-            with st.spinner(tl("中心性を計算中...","Computing centrality...")):
-                centrality = compute_centrality(vos_data)
-            st.session_state["vos_data"] = vos_data
-            st.session_state["work_keywords"] = work_keywords
-            st.session_state["cluster_map"] = cluster_map
-            st.session_state["cluster_labels_map"] = cluster_labels_map
-            st.session_state["analysis_type"] = analysis_type
-            st.session_state["viz_method"] = viz_method
-            st.session_state["centrality"] = centrality
-
-    # ── 引用系譜グラフ ──
-    _g_nodes = st.session_state.get("genealogy_nodes")
-    _g_edges = st.session_state.get("genealogy_edges")
-    _g_ana   = st.session_state.get("analysis_type", "")
-    if _g_nodes and tl("引用系譜","Citation Genealogy") in _g_ana:
-        st.markdown("---")
-        _g_direction   = st.session_state.get("genealogy_direction_value", "backward")
-        _g_seed_title  = st.session_state.get("genealogy_seed_title", "")
-
-        if _g_direction == "forward":
-            st.subheader(tl("🌳 被引用系譜グラフ（Forward Citation Genealogy）",
-                            "🌳 Forward Citation Genealogy Graph"))
-            st.caption(tl(
-                "矢印の向き: 引用している論文 → 引用されている論文（起点論文が中心、外側ほど新しい）",
-                "Arrow direction: citing paper → cited paper (seed at center, outer nodes are newer)"
-            ))
-        else:
-            st.subheader(tl("🌳 引用系譜グラフ（Backward Citation Genealogy）",
-                            "🌳 Backward Citation Genealogy Graph"))
-            st.caption(tl(
-                "矢印の向き: 元論文 → 引用されている論文（起点論文が中心、外側ほど古い）",
-                "Arrow direction: paper → its reference (seed at center, outer nodes are older)"
-            ))
-
-        if _g_seed_title:
-            st.caption(tl(f"🔵 起点論文: **{_g_seed_title}**",
-                          f"🔵 Seed paper: **{_g_seed_title}**"))
-
-        # 世代ごとの凡例（方向に応じてラベルを変える）
-        if _g_direction == "forward":
-            _gen_legend = {
-                0: ("🔵", tl("第0世代（起点論文）","Gen 0 (seed paper)"),           "#4477CC"),
-                1: ("🟢", tl("第1世代（直接引用した論文）","Gen 1 (direct citers)"), "#44AA66"),
-                2: ("🟡", tl("第2世代","Gen 2"),                                     "#CC9922"),
-                3: ("🔴", tl("第3世代","Gen 3"),                                     "#CC4444"),
-            }
-        else:
-            _gen_legend = {
-                0: ("🔵", tl("第0世代（起点論文）","Gen 0 (seed paper)"),          "#4477CC"),
-                1: ("🟢", tl("第1世代（直接参照）","Gen 1 (direct references)"),   "#44AA66"),
-                2: ("🟡", tl("第2世代","Gen 2"),                                    "#CC9922"),
-                3: ("🔴", tl("第3世代","Gen 3"),                                    "#CC4444"),
-            }
-        _gen_counts = {}
-        for nd in _g_nodes.values():
-            g = nd.get("gen", 0)
-            _gen_counts[g] = _gen_counts.get(g, 0) + 1
-
-        _lcols = st.columns(len(_gen_counts))
-        for i, (g, cnt) in enumerate(sorted(_gen_counts.items())):
-            icon, label, _ = _gen_legend.get(g, ("⚪", f"Gen {g}", "#aaa"))
-            _lcols[i].metric(f"{icon} {label}", f"{cnt} {tl('論文','papers')}")
-
-        # エッジのうちグラフ内ノード間のみカウント
-        _valid_edges = [(s, t) for s, t in _g_edges
-                        if s in _g_nodes and t in _g_nodes]
-        st.caption(tl(
-            f"総ノード: {len(_g_nodes)}　有向エッジ: {len(_valid_edges)}　"
-            f"（矢印の向き: 元論文 → 引用されている論文）",
-            f"Total nodes: {len(_g_nodes)}　Directed edges: {len(_valid_edges)}　"
-            f"(Arrow direction: paper → its reference)"
-        ))
-
-        # 引用なし・参照なし のケースを明示
-        _non_seed_count = sum(1 for nd in _g_nodes.values() if nd.get("gen", 0) > 0)
-        if _non_seed_count == 0:
-            if _g_direction == "forward":
-                st.warning(tl(
-                    "⚠️ この論文を引用している論文が OpenAlex に登録されていません。"
-                    "出版直後の論文や被引用数が0の論文では被引用系譜は表示できません。",
-                    "⚠️ No papers citing this work were found in OpenAlex. "
-                    "Very recent papers or works with 0 citations will show no forward genealogy."
-                ))
-            else:
-                st.warning(tl(
-                    "⚠️ この論文の参考文献データが OpenAlex に登録されていません。"
-                    "参考文献リストが取得できないため引用系譜を表示できません。",
-                    "⚠️ No reference data found for this paper in OpenAlex. "
-                    "Cannot build backward genealogy without reference lists."
-                ))
-        else:
-            render_genealogy_pyvis(_g_nodes, _g_edges)
-
-        # テーブル表示
-        with st.expander(tl("📋 系譜ノード一覧","📋 Genealogy Node List"), expanded=True):
-            import pandas as pd
-            _seed_wid  = st.session_state.get("genealogy_seed_id", "")
-            _g_rows = []
-            for nid, nd in _g_nodes.items():
-                g    = nd.get("gen", 0)
-                icon = _gen_legend.get(g, ("⚪","",""))[0]
-                is_seed = (nid == _seed_wid)
-                _g_rows.append({
-                    "_gen_num": g,
-                    tl("世代","Gen"):      f"{icon} Gen {g}",
-                    tl("種別","Type"):     tl("⭐ 起点論文","⭐ Seed paper") if is_seed else tl(f"第{g}世代引用","Gen {g} reference").format(g=g),
-                    tl("タイトル","Title"): nd.get("title", "")[:100],
-                    tl("年","Year"):       nd.get("year", ""),
-                    "OpenAlex ID":         nid,
-                })
-            # 世代番号で正しく昇順ソート（Gen 0 → 1 → 2 → 3）
-            _g_rows.sort(key=lambda r: (r["_gen_num"], 0 if r[tl("種別","Type")].startswith("⭐") else 1))
-            for r in _g_rows:
-                del r["_gen_num"]
-            st.dataframe(pd.DataFrame(_g_rows), use_container_width=True, hide_index=True)
+        with st.spinner(tl("中心性を計算中...","Computing centrality...")):
+            centrality = compute_centrality(vos_data)
+        st.session_state["vos_data"] = vos_data
+        st.session_state["work_keywords"] = work_keywords
+        st.session_state["cluster_map"] = cluster_map
+        st.session_state["cluster_labels_map"] = cluster_labels_map
+        st.session_state["analysis_type"] = analysis_type
+        st.session_state["viz_method"] = viz_method
+        st.session_state["centrality"] = centrality
 
     # ── DOI引用ネットワーク（ページ上部に表示）──
     _cite_target = st.session_state.get("cite_target")
@@ -3301,118 +2116,7 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                 f"Fetching citing papers (up to {_cite_max})..."
             )):
                 _citing_works = fetch_citing_works_full(
-                    _cite_target["id"], max_papers=_cite_max, mailto=_oa_email()
-                )
-            st.session_state["cite_works"] = _citing_works
-
-        _citing_works = st.session_state.get("cite_works", [])
-
-        if _citing_works:
-            _years = [w.get("publication_year") for w in _citing_works
-                      if w.get("publication_year")]
-            _cm1, _cm2, _cm3, _cm4 = st.columns(4)
-            _cm1.metric(tl("引用論文数","Citing papers"), len(_citing_works))
-            _cm2.metric(tl("最古","Earliest"), min(_years) if _years else "—")
-            _cm3.metric(tl("最新","Latest"),   max(_years) if _years else "—")
-            _cm4.metric(tl("年数範囲","Year span"),
-                        f"{max(_years)-min(_years)}年" if len(_years)>1 else "—")
-
-            import pandas as pd
-            try:
-                import plotly.express as px
-                _yr_df = (pd.Series(_years).value_counts()
-                          .sort_index().reset_index())
-                _yr_df.columns = [tl("年","Year"), tl("論文数","Papers")]
-                _fig_yr = px.bar(
-                    _yr_df, x=tl("年","Year"), y=tl("論文数","Papers"),
-                    title=tl("引用論文の年別分布","Citing Papers by Year"),
-                    color=tl("論文数","Papers"),
-                    color_continuous_scale="Teal"
-                )
-                _fig_yr.update_layout(coloraxis_showscale=False)
-                st.plotly_chart(_fig_yr, use_container_width=True)
-            except ImportError:
-                pass
-
-            with st.spinner(tl("書誌結合ネットワークを構築中...","Building bibliographic coupling network...")):
-                _cite_vos = build_citation_network(
-                    _citing_works,
-                    citation_type="bibliographic_coupling",
-                    min_links=_cite_min_links
-                )
-
-            _cn_items = _cite_vos.get("items", [])
-            _cn_links = _cite_vos.get("links", [])
-            _ci1, _ci2 = st.columns(2)
-            _ci1.metric(tl("ノード数","Nodes"), len(_cn_items))
-            _ci2.metric(tl("エッジ数","Edges"), len(_cn_links))
-
-            if _cn_items:
-                st.success(tl(
-                    "✅ DOI引用ネットワーク構築完了。JSONをダウンロードしてください。",
-                    "✅ DOI citation network built. Download the JSON."
-                ))
-                st.info(tl(
-                    "💡 VOSviewerで **Scores → Year** を選択すると、論文が出版年ごとに色分けされます。",
-                    "💡 In VOSviewer, select **Scores → Year** to color nodes by publication year."
-                ))
-                _vos_json = json.dumps({"network": _cite_vos}, ensure_ascii=False, indent=2)
-                _safe_title = re.sub(r"[^\w]", "_", _ct_title[:30])
-                st.download_button(
-                    tl("📥 VOSviewer JSON ダウンロード","📥 Download VOSviewer JSON"),
-                    data=_vos_json.encode("utf-8"),
-                    file_name=f"doi_cite_{_safe_title}.json",
-                    mime="application/json",
-                    type="primary"
-                )
-            else:
-                st.warning(tl(
-                    f"共有参考文献が{_cite_min_links}件以上の論文ペアがありません。"
-                    "「最小共有参考文献数」を1に下げてみてください。",
-                    f"No paper pairs share ≥{_cite_min_links} references. "
-                    "Try lowering 'Min shared references' to 1."
-                ))
-
-    # ── DOI引用ネットワーク（ページ上部に表示）──
-    _cite_target = st.session_state.get("cite_target")
-    if _cite_target and _cite_target.get("id"):
-        st.markdown("---")
-        _ct_title = _cite_target["title"]
-        st.subheader(tl("🔬 引用論文ネットワーク（VOSviewer分析）",
-                        "📊 DOI Citation Network Analysis"))
-        st.markdown(f"**{_ct_title[:90]}{'...' if len(_ct_title)>90 else ''}**")
-        st.caption(tl(
-            "この論文を引用している論文群を書誌結合で分析します。"
-            "年情報付きVOSviewer JSONをダウンロードしてVOSviewerで開いてください。",
-            "Analyzes papers citing this work via bibliographic coupling. "
-            "Download the VOSviewer JSON with year scores and open in VOSviewer."
-        ))
-
-        _col_a, _col_b = st.columns([3, 1])
-        with _col_b:
-            if st.button(tl("✕ 閉じる","✕ Close"), key="close_cite"):
-                st.session_state["cite_target"] = None
-                st.session_state["cite_works"] = []
-                st.rerun()
-
-        _cite_max = _col_a.slider(
-            tl("取得する引用論文数","Max citing papers to fetch"),
-            min_value=50, max_value=500, value=200, step=50,
-            key="cite_max_papers"
-        )
-        _cite_min_links = _col_a.slider(
-            tl("最小共有参考文献数（書誌結合の閾値）","Min shared references (coupling threshold)"),
-            min_value=1, max_value=10, value=2, key="cite_min_links"
-        )
-
-        if st.button(tl("▶ 取得・ネットワーク構築","▶ Fetch & Build Network"),
-                     type="primary", key="run_cite_vos"):
-            with st.spinner(tl(
-                f"引用論文を取得中（最大{_cite_max}件）...",
-                f"Fetching citing papers (up to {_cite_max})..."
-            )):
-                _citing_works = fetch_citing_works_full(
-                    _cite_target["id"], max_papers=_cite_max, mailto=_oa_email()
+                    _cite_target["id"], max_papers=_cite_max
                 )
             st.session_state["cite_works"] = _citing_works
 
@@ -3774,176 +2478,76 @@ function openGephiLite() {{
                 use_container_width=True, hide_index=True
             )
 
-            # 全指標の説明を凡例として表示
-            with st.expander(tl("📖 指標の説明","📖 Metric Descriptions"), expanded=False):
-                st.markdown(tl(
-                    "- **PageRank**：重要なノードからリンクされているほど高スコア。学術的影響力の高い著者・論文を特定します。\n"
-                    "- **媒介中心性 (Betweenness)**：他のノード間の最短経路上に多く現れるノードほど高スコア。異なる研究グループを橋渡しするハブ的存在を示します。\n"
-                    "- **次数中心性 (Degree)**：直接つながっているノードの数（最大値で正規化）。最も多くの著者・論文と直接接続しているノードを示します。",
-                    "- **PageRank**: Higher score when linked from important nodes. Identifies highly influential authors/papers.\n"
-                    "- **Betweenness Centrality**: Higher score for nodes that frequently appear on shortest paths between others. Identifies bridges connecting different research groups.\n"
-                    "- **Degree Centrality**: Number of direct connections (normalized by max). Shows nodes with the most direct links to other authors/papers."
-                ))
-
-            # ── KAKEN助成金分析へ引き渡し ──
-            st.markdown("---")
-            _ana_label_s2 = st.session_state.get("analysis_type", "")
-            _is_author_net = tl("共著","Co-authorship") in _ana_label_s2
-            _term_type_ja  = "著者名" if _is_author_net else "キーワード"
-            _term_type_en  = "author name" if _is_author_net else "keyword"
-            _ranked_for_kaken = sorted(
-                centrality.items(), key=lambda x: x[1]["pagerank"], reverse=True
-            )[:30]
-            _top30_labels = [label for label, _ in _ranked_for_kaken]
-
-            with st.expander(
-                tl("📤 ③ KAKEN助成金分析へ引き渡す",
-                   "📤 Send to ③ KAKEN Grant Analysis"),
-                expanded=False
-            ):
-                st.caption(tl(
-                    f"ランキング上位の{_term_type_ja}をKAKEN助成金検索へ引き渡します。"
-                    "KAKENは日本語の研究課題名で登録されているため、**日本語への変換を推奨**します（英語も可）。",
-                    f"Transfer top {_term_type_en}s from the ranking to KAKEN grant search. "
-                    "Japanese keywords are recommended as KAKEN project titles are in Japanese (English also works)."
-                ))
-
-                _sel_item = st.selectbox(
-                    tl(f"引き渡す{_term_type_ja}を選択（PageRank上位30）",
-                       f"Select {_term_type_en} to transfer (Top 30 by PageRank)"),
-                    [tl("（選択してください）","(select one)")] + _top30_labels,
-                    key="kaken_transfer_select"
-                )
-                _default_val = (
-                    "" if _sel_item == tl("（選択してください）","(select one)")
-                    else _sel_item
-                )
-
-                _kaken_send_kw = st.text_input(
-                    tl("KAKENキーワード（日本語推奨・編集可）",
-                       "KAKEN keyword (Japanese recommended, editable)"),
-                    value=_default_val,
-                    key="kaken_transfer_input",
-                    placeholder=tl(
-                        "例: リチウムイオン電池 / 固体電解質",
-                        "e.g. リチウムイオン電池 / solid electrolyte"
-                    )
-                )
-
-                if _is_author_net:
-                    st.info(tl(
-                        "💡 共著ネットワークの著者名を引き渡す場合、KAKEN検索では"
-                        "「研究課題名キーワード」での検索が効果的です。"
-                        "必要に応じて著者の研究分野のキーワードに変換してください。",
-                        "💡 For co-authorship networks, searching by the researcher's "
-                        "topic keyword tends to work better than the author name in KAKEN. "
-                        "Consider converting to a research topic keyword if needed."
-                    ))
-
-                _send_col, _clear_col = st.columns([3, 1])
-                _kw_to_send = _kaken_send_kw.strip() or _default_val
-                if _send_col.button(
-                    tl("📤 KAKEN分析へ送る","📤 Send to KAKEN Analysis"),
-                    type="primary", key="kaken_send_btn",
-                    disabled=not bool(_kw_to_send)
-                ):
-                    st.session_state["kaken_transfer_kw"]        = _kw_to_send
-                    st.session_state["kaken_transfer_is_author"]  = _is_author_net
-                    st.session_state["kaken_transfer_source"]     = _ana_label_s2
-                    st.session_state["kaken_transfer_applied"]    = False
-                    st.success(tl(
-                        f"✅「{_kw_to_send}」を送信しました。"
-                        "サイドバーで「③ KAKEN助成金分析」を選択してください。",
-                        f"✅ Sent '{_kw_to_send}' to KAKEN. "
-                        "Select '③ KAKEN Grant Analysis' in the sidebar."
-                    ))
-                if _clear_col.button(tl("クリア","Clear"), key="kaken_send_clear"):
-                    for _k in ["kaken_transfer_kw","kaken_transfer_is_author",
-                               "kaken_transfer_source","kaken_transfer_applied"]:
-                        st.session_state.pop(_k, None)
-                    st.rerun()
-
-        # ── 重要論文ランキング（被引用数順） ──
+        # ── 重要論文ランキング（被引用数） ──
         st.markdown("---")
         st.subheader(tl("📄 重要論文ランキング（被引用数順）",
                         "📄 Key Papers Ranking (by citation count)"))
-
-        # PubMedデータ（被引用数なし）の場合はメッセージのみ表示して終了
-        _is_pubmed_src = any(w.get("_source") == "pubmed" for w in works)
-        if _is_pubmed_src:
-            st.warning(tl(
-                "⚠️ PubMedは引用情報を提供していないため、重要論文ランキングは表示できません。",
-                "⚠️ PubMed does not provide citation counts, so the key papers ranking is unavailable."
-            ))
-        else:
-            st.caption(tl(
-                "ネットワーク分析に依存せず、データセット内の論文を**被引用数**で直接ランキングします。"
-                "論文数が少ない場合でも信頼性の高い重要度指標です。",
-                "Ranks papers directly by **citation count**, independent of network analysis. "
-                "A reliable importance measure even with smaller datasets."
-            ))
-            st.caption(tl(
-                "💰 **研究費対被引用コスト（Funding Cost per Citation）の推定**: "
-                "ステップ3のKAKENデータで取得した助成金額をこの表の被引用数で割ることで、"
-                "「1被引用あたりの研究費」を概算できます。研究費対効果の評価指標として活用してください。",
-                "💰 **Funding Cost per Citation**: Divide the grant amount from Step 3 KAKEN data "
-                "by the citation counts in this table to estimate the cost per citation. "
-                "Use this as a proxy metric for research funding efficiency."
-            ))
+        st.caption(tl(
+            "ネットワーク分析に依存せず、データセット内の論文を**被引用数**で直接ランキングします。"
+            "論文数が少ない場合でも信頼性の高い重要度指標です。",
+            "Ranks papers directly by **citation count**, independent of network analysis. "
+            "A reliable importance measure even with smaller datasets."
+        ))
+        st.caption(tl(
+            "💰 **研究費対被引用コスト（Funding Cost per Citation）の推定**: "
+            "ステップ3のKAKENデータで取得した助成金額をこの表の被引用数で割ることで、"
+            "「1被引用あたりの研究費」を概算できます。研究費対効果の評価指標として活用してください。",
+            "💰 **Funding Cost per Citation**: Divide the grant amount from Step 3 KAKEN data "
+            "by the citation counts in this table to estimate the cost per citation. "
+            "Use this as a proxy metric for research funding efficiency."
+        ))
 
         import pandas as pd
-        if not _is_pubmed_src:
-            _top_n_papers = st.slider(
-                tl("表示件数","Top N papers"), 5, 100, 20, key="top_papers_n"
-            )
-            _paper_rows = []
-            for w in works:
-                title  = w.get("title","") or "No title"
-                year   = w.get("publication_year","") or 0
-                cited  = w.get("cited_by_count", 0) or 0
-                doi    = w.get("doi","") or ""
-                auths  = [a.get("author",{}).get("display_name","")
-                          for a in w.get("authorships",[])[:3]]
-                topics = [t.get("display_name","") for t in w.get("topics",[])[:2]]
-                _paper_rows.append({
-                    tl("被引用数","Cited"):   cited,
-                    tl("タイトル","Title"):   title,
-                    tl("著者","Authors"):     "; ".join(filter(None, auths)),
-                    tl("年","Year"):          year,
-                    tl("トピック","Topics"):  "; ".join(topics),
-                    "DOI":                    doi,
-                })
+        _top_n_papers = st.slider(
+            tl("表示件数","Top N papers"), 5, 100, 20, key="top_papers_n"
+        )
+        _paper_rows = []
+        for w in works:
+            title  = w.get("title","") or "No title"
+            year   = w.get("publication_year","")
+            cited  = w.get("cited_by_count", 0) or 0
+            doi    = w.get("doi","") or ""
+            auths  = [a.get("author",{}).get("display_name","")
+                      for a in w.get("authorships",[])[:3]]
+            topics = [t.get("display_name","") for t in w.get("topics",[])[:2]]
+            _paper_rows.append({
+                tl("被引用数","Cited"):   cited,
+                tl("タイトル","Title"):   title,
+                tl("著者","Authors"):     "; ".join(filter(None, auths)),
+                tl("年","Year"):          year,
+                tl("トピック","Topics"):  "; ".join(topics),
+                "DOI":                    doi,
+            })
 
-            _papers_df = (
-                pd.DataFrame(_paper_rows)
-                .sort_values(tl("被引用数","Cited"), ascending=False)
-                .reset_index(drop=True)
-            )
-            _papers_df.index = _papers_df.index + 1  # 1始まり
-            _display_cols = None
+        _papers_df = (
+            pd.DataFrame(_paper_rows)
+            .sort_values(tl("被引用数","Cited"), ascending=False)
+            .reset_index(drop=True)
+        )
+        _papers_df.index = _papers_df.index + 1  # 1始まり
 
-        # 上位N件をテーブル表示（PubMedは非表示）
-        if not _is_pubmed_src:
-            _show_df = _papers_df.head(_top_n_papers)
-            st.dataframe(_show_df.drop(columns=["DOI"]), use_container_width=True)
+        # 上位N件をテーブル表示
+        st.dataframe(
+            _papers_df.head(_top_n_papers).drop(columns=["DOI"]),
+            use_container_width=True
+        )
 
-        # 詳細エキスパンダー（PubMedは非表示）
-        if not _is_pubmed_src:
-            for rank, row in _papers_df.head(_top_n_papers).iterrows():
-                _cited_label = tl(f"📊 被引用: {row[tl('被引用数','Cited')]}",
-                                  f"📊 Cited: {row[tl('被引用数','Cited')]}")
-                with st.expander(
-                    f"{rank}. {row[tl('タイトル','Title')][:70]}"
-                    f"{'...' if len(row[tl('タイトル','Title')])>70 else ''}  "
-                    f"({row[tl('年','Year')]})  {_cited_label}"
-                ):
-                    st.markdown(f"**{row[tl('タイトル','Title')]}**")
-                    if row[tl("著者","Authors")]:
-                        st.caption("✍️ " + row[tl("著者","Authors")])
-                    if row[tl("トピック","Topics")]:
-                        st.caption("🏷️ " + row[tl("トピック","Topics")])
-                    if row["DOI"]:
-                        st.markdown(f"[🔗 DOI]({row['DOI']})")
+        # 詳細エキスパンダー
+        for rank, row in _papers_df.head(_top_n_papers).iterrows():
+            _cited_label = tl(f"📊 被引用: {row[tl('被引用数','Cited')]}",
+                              f"📊 Cited: {row[tl('被引用数','Cited')]}")
+            with st.expander(
+                f"{rank}. {row[tl('タイトル','Title')][:70]}"
+                f"{'...' if len(row[tl('タイトル','Title')])>70 else ''}  "
+                f"({row[tl('年','Year')]})  {_cited_label}"
+            ):
+                st.markdown(f"**{row[tl('タイトル','Title')]}**")
+                if row[tl("著者","Authors")]:
+                    st.caption("✍️ " + row[tl("著者","Authors")])
+                if row[tl("トピック","Topics")]:
+                    st.caption("🏷️ " + row[tl("トピック","Topics")])
+                if row["DOI"]:
+                    st.markdown(f"[🔗 DOI]({row['DOI']})")
                 # アブストラクト
                 _w = next((w for w in works if w.get("title","") == row[tl("タイトル","Title")]), None)
                 if _w:
@@ -3959,7 +2563,7 @@ function openGephiLite() {{
                             key=f"cite_btn_{rank}"
                         ):
                             with st.spinner(tl("引用論文を取得・ネットワーク構築中...","Fetching & building DOI citation network...")):
-                                _cw = fetch_citing_works_full(_wid, max_papers=200, mailto=_oa_email())
+                                _cw = fetch_citing_works_full(_wid, max_papers=200)
                                 if _cw:
                                     _vos = build_citation_network(_cw, citation_type="bibliographic_coupling", min_links=1)
                                     st.session_state[_cite_key] = {
@@ -3986,15 +2590,14 @@ function openGephiLite() {{
                             else:
                                 st.info(tl("引用論文が見つかりませんでした。","No citing papers found."))
 
-        # CSVダウンロード（PubMedは被引用数なしのため非表示）
-        if not _is_pubmed_src:
-            _csv_papers = _papers_df.to_csv(index=True).encode("utf-8-sig")
-            st.download_button(
-                tl("📥 CSVダウンロード（全件）","📥 Download CSV (all papers)"),
-                data=_csv_papers,
-                file_name="key_papers.csv",
-                mime="text/csv"
-            )
+        # CSVダウンロード
+        _csv_papers = _papers_df.to_csv(index=True).encode("utf-8-sig")
+        st.download_button(
+            tl("📥 CSVダウンロード（全件）","📥 Download CSV (all papers)"),
+            data=_csv_papers,
+            file_name="key_papers.csv",
+            mime="text/csv"
+        )
 
         # ── 上位ノード & 論文逆引き ──
         st.markdown("---")
@@ -4058,7 +2661,7 @@ function openGephiLite() {{
                                 key=f"cite_nd_{_wid2}"
                             ):
                                 with st.spinner(tl("引用論文を取得・ネットワーク構築中...","Fetching & building DOI citation network...")):
-                                    _cw2 = fetch_citing_works_full(_wid2, max_papers=200, mailto=_oa_email())
+                                    _cw2 = fetch_citing_works_full(_wid2, max_papers=200)
                                     if _cw2:
                                         _vos2 = build_citation_network(_cw2, citation_type="bibliographic_coupling", min_links=1)
                                         st.session_state[_cite_key2] = {
@@ -4089,178 +2692,67 @@ function openGephiLite() {{
                     st.session_state["sel_node"] = None
                     st.rerun()
 
-        # ── 特許×論文 引用ブリッジ（Lens.orgデータセット内照合 + クロスデータセット）──
-        st.markdown("---")
-        st.subheader(tl("📑 論文-特許 引用ブリッジ分析", "📑 Paper-Patent Citation Bridge"))
-        st.caption(tl(
-            "特許のNPL引用（非特許文献）と論文のDOIを照合し、どの特許がどの論文を引用しているかを可視化します。",
-            "Matches patent NPL citations against paper DOIs to reveal which patents cite which papers."
-        ))
-
-        _bridge_tab1, _bridge_tab2 = st.tabs([
-            tl("🔁 同一データセット照合","🔁 Within Dataset"),
-            tl("🔀 クロスデータセット照合","🔀 Cross-Dataset"),
-        ])
-
-        # ── タブ1: 同一データセット（Lens.orgデータのみ）──
-        with _bridge_tab1:
-            _patents_in_ds = data.get("patents", [])
-            if not _patents_in_ds:
-                st.info(tl(
-                    "このデータセットには特許データが含まれていません。"
-                    "Lens.orgで収集したデータセットを選択してください。",
-                    "No patent data in this dataset. Please select a Lens.org dataset."
-                ))
-            else:
-                _pat_n    = len(_patents_in_ds)
-                _paper_n  = len(works)
-                _npl_total = sum(len(p.get("npl_citations", [])) for p in _patents_in_ds)
-                _bm1, _bm2, _bm3 = st.columns(3)
-                _bm1.metric(tl("特許数","Patents"), _pat_n)
-                _bm2.metric(tl("照合論文数","Resolved papers"), _paper_n)
-                _bm3.metric(tl("NPL引用合計","NPL citations"), _npl_total)
-
-                if st.button(
-                    tl("▶ 引用ブリッジ照合を実行","▶ Run Citation Bridge Matching"),
-                    type="primary", key="run_bridge_same", use_container_width=True,
-                ):
-                    with st.spinner(tl("DOI照合中...","Matching by DOI...")):
-                        _pairs = match_papers_patents_by_doi(works, _patents_in_ds)
-                    st.session_state["bridge_pairs_same"] = _pairs
-
-                _pairs = st.session_state.get("bridge_pairs_same")
-                if _pairs is not None:
-                    if not _pairs:
-                        st.warning(tl(
-                            "照合結果: 0件。NPL引用のDOIと論文のDOIが一致しませんでした。",
-                            "No matches found. NPL citation DOIs did not match any paper DOIs."
-                        ))
-                    else:
-                        st.success(tl(
-                            f"✅ {len(_pairs)}件の引用関係が見つかりました（特許→論文）",
-                            f"✅ Found {len(_pairs)} citation link(s) (patent → paper)"
-                        ))
-                        st.caption(tl(
-                            "🟠 四角＝特許 　🔵 円＝論文　矢印の向き: 特許 → 引用されている論文",
-                            "🟠 Square=Patent  🔵 Circle=Paper  Arrow: Patent → cited paper"
-                        ))
-                        render_bipartite_pyvis(_pairs)
-
-                        # 照合テーブル
-                        with st.expander(tl("📋 照合結果一覧","📋 Match List"), expanded=False):
-                            import pandas as pd
-                            _tbl = []
-                            for pr in _pairs:
-                                _tbl.append({
-                                    tl("特許タイトル","Patent Title"):
-                                        (pr["patent"].get("title","") or "")[:60],
-                                    tl("出願年","Year"):
-                                        (pr["patent"].get("date_published","") or "")[:4],
-                                    tl("管轄","Jurisdiction"):
-                                        pr["patent"].get("jurisdiction",""),
-                                    tl("論文タイトル","Paper Title"):
-                                        (pr["paper"].get("title","") or "")[:60],
-                                    tl("論文年","Pub Year"):
-                                        str(pr["paper"].get("publication_year","") or ""),
-                                    "DOI": pr["paper"].get("doi",""),
-                                })
-                            st.dataframe(pd.DataFrame(_tbl), use_container_width=True, hide_index=True)
-
-                        # VOSviewer JSON
-                        with st.spinner(tl("VOSviewerデータ生成中...","Generating VOSviewer JSON...")):
-                            _pp_net = build_patent_paper_network(_patents_in_ds, works)
-                        _pp_json = json.dumps({"network": _pp_net}, ensure_ascii=False, indent=2)
-                        _pp_fname = re.sub(r"[^\w]","_", selected_ds[:30]) + "_bridge.json"
-                        st.download_button(
-                            tl("📥 VOSviewer JSON ダウンロード","📥 Download VOSviewer JSON"),
-                            data=_pp_json.encode("utf-8"),
-                            file_name=_pp_fname, mime="application/json",
-                            key="dl_bridge_same",
-                        )
-
-        # ── タブ2: クロスデータセット照合 ──
-        with _bridge_tab2:
+        # ── 特許×論文ネットワーク（Lens.orgデータセットのみ）──
+        _patents_in_ds = data.get("patents", [])
+        if _patents_in_ds:
+            st.markdown("---")
+            st.subheader(tl("🔬 特許×論文 ネットワーク", "🔬 Patent × Paper Network"))
             st.caption(tl(
-                "論文データセット（OpenAlex）と特許データセット（Lens.org）を別々に選択して照合できます。",
-                "Select a paper dataset (OpenAlex) and a patent dataset (Lens.org) separately to cross-match."
+                "特許のNPL引用から照合された論文とのリンクを VOSviewer JSON 形式でエクスポートします。",
+                "Export patent-to-paper NPL citation links as VOSviewer JSON."
             ))
-            _all_ds = list_datasets()
-            _cx_col1, _cx_col2 = st.columns(2)
-            with _cx_col1:
-                _cx_paper_ds = st.selectbox(
-                    tl("📄 論文データセット","📄 Paper dataset"),
-                    _all_ds, key="cx_paper_ds",
-                )
-            with _cx_col2:
-                _cx_patent_ds = st.selectbox(
-                    tl("🔧 特許データセット（Lens.org）","🔧 Patent dataset (Lens.org)"),
-                    _all_ds, key="cx_patent_ds",
-                )
+
+            _pat_n = len(_patents_in_ds)
+            _paper_n = len(works)
+            _npl_total = sum(len(p.get("npl_citations", [])) for p in _patents_in_ds)
+            _pm1, _pm2, _pm3 = st.columns(3)
+            _pm1.metric(tl("特許数", "Patents"), _pat_n)
+            _pm2.metric(tl("照合論文数", "Resolved papers"), _paper_n)
+            _pm3.metric(tl("NPL引用（合計）", "NPL citations (total)"), _npl_total)
 
             if st.button(
-                tl("▶ クロス照合を実行","▶ Run Cross-Dataset Matching"),
-                type="primary", key="run_bridge_cross", use_container_width=True,
+                tl("▶ 特許×論文ネットワーク構築 & ダウンロード",
+                   "▶ Build Patent×Paper Network & Download"),
+                type="primary", key="build_patent_network",
+                use_container_width=True,
             ):
-                _cx_paper_data  = load_dataset(_cx_paper_ds)
-                _cx_patent_data = load_dataset(_cx_patent_ds)
-                _cx_papers  = (_cx_paper_data  or {}).get("works", [])
-                _cx_patents = (_cx_patent_data or {}).get("patents", [])
-                if not _cx_patents:
-                    st.error(tl(
-                        "選択した特許データセットに特許データがありません。Lens.orgで収集したデータセットを選んでください。",
-                        "Selected patent dataset has no patents. Choose a dataset collected from Lens.org."
-                    ))
-                else:
-                    with st.spinner(tl("クロス照合中...","Cross-matching...")):
-                        _cx_pairs = match_papers_patents_by_doi(_cx_papers, _cx_patents)
-                    st.session_state["bridge_pairs_cross"] = _cx_pairs
-                    st.session_state["bridge_cross_meta"]  = {
-                        "paper_ds": _cx_paper_ds, "patent_ds": _cx_patent_ds,
-                        "n_papers": len(_cx_papers), "n_patents": len(_cx_patents),
-                    }
+                with st.spinner(tl("特許×論文ネットワークを構築中...",
+                                   "Building patent×paper network...")):
+                    _pp_net = build_patent_paper_network(_patents_in_ds, works)
 
-            _cx_pairs = st.session_state.get("bridge_pairs_cross")
-            _cx_meta  = st.session_state.get("bridge_cross_meta", {})
-            if _cx_pairs is not None:
-                if _cx_meta:
-                    st.caption(
-                        f"📄 {_cx_meta.get('paper_ds','')} ({_cx_meta.get('n_papers',0)} papers)  ×  "
-                        f"🔧 {_cx_meta.get('patent_ds','')} ({_cx_meta.get('n_patents',0)} patents)"
+                _pp_items = _pp_net.get("items", [])
+                _pp_links = _pp_net.get("links", [])
+                _pp_patents = [i for i in _pp_items if i.get("cluster") == 1]
+                _pp_papers  = [i for i in _pp_items if i.get("cluster") == 2]
+
+                st.success(tl(
+                    f"✅ ノード: 特許 {len(_pp_patents)}件 / 論文 {len(_pp_papers)}件  "
+                    f"/ エッジ: {len(_pp_links)}件",
+                    f"✅ Nodes: {len(_pp_patents)} patents / {len(_pp_papers)} papers  "
+                    f"/ Edges: {len(_pp_links)}"
+                ))
+
+                if _pp_items:
+                    _pp_json = json.dumps({"network": _pp_net}, ensure_ascii=False, indent=2)
+                    _pp_fname = re.sub(r"[^\w]", "_", selected_ds[:30]) + "_patent_paper.json"
+                    st.download_button(
+                        tl("📥 VOSviewer JSON ダウンロード（特許×論文）",
+                           "📥 Download VOSviewer JSON (Patent×Paper)"),
+                        data=_pp_json.encode("utf-8"),
+                        file_name=_pp_fname,
+                        mime="application/json",
+                        type="primary",
+                        key="dl_patent_paper_net",
                     )
-                if not _cx_pairs:
-                    st.warning(tl(
-                        "照合結果: 0件。2つのデータセット間に引用関係が見つかりませんでした。",
-                        "No matches. No citation links found between the two datasets."
+                    st.info(tl(
+                        "💡 VOSviewerで開いて Cluster 1（特許）と Cluster 2（論文）の色分けを確認できます。",
+                        "💡 Open in VOSviewer to see Cluster 1 (patents) and Cluster 2 (papers) colored separately."
                     ))
                 else:
-                    st.success(tl(
-                        f"✅ {len(_cx_pairs)}件の引用関係（特許→論文）",
-                        f"✅ {len(_cx_pairs)} citation link(s) (patent → paper)"
+                    st.warning(tl(
+                        "リンクが見つかりませんでした。DOIが抽出されなかった可能性があります。",
+                        "No links found. DOIs may not have been extracted from NPL citations."
                     ))
-                    st.caption(tl(
-                        "🟠 四角＝特許 　🔵 円＝論文　矢印の向き: 特許 → 引用されている論文",
-                        "🟠 Square=Patent  🔵 Circle=Paper  Arrow: Patent → cited paper"
-                    ))
-                    render_bipartite_pyvis(_cx_pairs)
-
-                    with st.expander(tl("📋 照合結果一覧","📋 Match List"), expanded=False):
-                        import pandas as pd
-                        _cx_tbl = []
-                        for pr in _cx_pairs:
-                            _cx_tbl.append({
-                                tl("特許タイトル","Patent Title"):
-                                    (pr["patent"].get("title","") or "")[:60],
-                                tl("出願年","Year"):
-                                    (pr["patent"].get("date_published","") or "")[:4],
-                                tl("管轄","Jurisdiction"):
-                                    pr["patent"].get("jurisdiction",""),
-                                tl("論文タイトル","Paper Title"):
-                                    (pr["paper"].get("title","") or "")[:60],
-                                tl("論文年","Pub Year"):
-                                    str(pr["paper"].get("publication_year","") or ""),
-                                "DOI": pr["paper"].get("doi",""),
-                            })
-                        st.dataframe(pd.DataFrame(_cx_tbl), use_container_width=True, hide_index=True)
 
 # ════════════════════════════════════════════
 # ステップ3: KAKEN助成金分析
@@ -4271,38 +2763,6 @@ if tl("③ KAKEN助成金分析","③ KAKEN Grant Analysis") in step:
         "OpenAlexが提供するKAKEN（科学研究費助成事業）データを集計・可視化します。",
         "Aggregate and visualize KAKEN (Grants-in-Aid for Scientific Research) data via OpenAlex."
     ))
-
-    # ── ステップ2からの引き継ぎ ──
-    _kaken_from_s2     = st.session_state.get("kaken_transfer_kw", "")
-    _kaken_from_s2_src = st.session_state.get("kaken_transfer_source", "")
-    _kaken_applied     = st.session_state.get("kaken_transfer_applied", False)
-    if _kaken_from_s2 and not _kaken_applied:
-        st.info(tl(
-            f"📤 **ステップ2から引き継ぎ中**: 「{_kaken_from_s2}」"
-            f"（分析手法: {_kaken_from_s2_src}）\n\n"
-            "「✅ 検索フィールドに適用」を押すとサイドバーのキーワード欄に自動入力されます。",
-            f"📤 **Transferred from Step 2**: '{_kaken_from_s2}' "
-            f"(Analysis: {_kaken_from_s2_src})\n\n"
-            "Click '✅ Apply to search field' to auto-fill the keyword in the sidebar."
-        ))
-        _apply_col, _dismiss_col = st.columns([2, 1])
-        if _apply_col.button(
-            tl("✅ 検索フィールドに適用","✅ Apply to search field"),
-            type="primary", key="kaken_apply_transfer"
-        ):
-            st.session_state["kaken_kw"]             = _kaken_from_s2
-            st.session_state["kaken_transfer_applied"] = True
-            st.rerun()
-        if _dismiss_col.button(tl("✕ 閉じる","✕ Dismiss"), key="kaken_dismiss_transfer"):
-            for _k in ["kaken_transfer_kw","kaken_transfer_source",
-                       "kaken_transfer_is_author","kaken_transfer_applied"]:
-                st.session_state.pop(_k, None)
-            st.rerun()
-    elif _kaken_from_s2 and _kaken_applied:
-        st.success(tl(
-            f"📤 ステップ2から引き継ぎ適用済み: 「{_kaken_from_s2}」",
-            f"📤 Applied from Step 2: '{_kaken_from_s2}'"
-        ))
 
     # ── サイドバーフィルタ ──
     with st.sidebar:
@@ -4346,7 +2806,7 @@ if tl("③ KAKEN助成金分析","③ KAKEN Grant Analysis") in step:
                 "sort": f"{sort_field}:desc",
                 "per_page": per_req,
                 "cursor": cursor,
-                "mailto": _oa_email(),
+                "mailto": "research@example.com",
             }
             try:
                 r = requests.get(base, params=params, timeout=20)
