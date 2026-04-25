@@ -53,6 +53,10 @@ lang = st.session_state.lang
 def tl(ja, en):
     return ja if lang == "ja" else en
 
+def _oa_email():
+    """OpenAlex polite pool 用メールアドレスを session_state から取得する"""
+    return st.session_state.get("openalex_email", "").strip() or "research@example.com"
+
 # ── KeyBERTモデル定義 ──
 KEYBERT_MODELS = {
     "SciBERT": (
@@ -93,18 +97,19 @@ BERTOPIC_MODELS = {
 # ユーティリティ
 # ────────────────────────────────────────────
 @st.cache_data(ttl=3600)
-def fetch_works(filters, per_page=500):
+def fetch_works(filters, per_page=500, mailto=""):
     base = "https://api.openalex.org/works"
     fields = "id,title,publication_year,doi,authorships,cited_by_count,abstract_inverted_index,topics,concepts,referenced_works"
     works, cursor = [], "*"
     per_req = min(per_page, 200)
+    _mailto = mailto or "research@example.com"
     while len(works) < per_page:
         params = {
             "filter": ",".join(filters),
             "per_page": per_req,
             "cursor": cursor,
             "select": fields,
-            "mailto": "research@example.com"
+            "mailto": _mailto
         }
         try:
             r = requests.get(base, params=params, timeout=20)
@@ -449,7 +454,7 @@ def resolve_npl_to_works(npl_list):
             try:
                 r = requests.get(
                     f"https://api.openalex.org/works/https://doi.org/{doi_clean}",
-                    params={"mailto": "research@example.com"}, timeout=10
+                    params={"mailto": _oa_email()}, timeout=10
                 )
                 if r.status_code == 200:
                     w = r.json()
@@ -465,7 +470,7 @@ def resolve_npl_to_works(npl_list):
             try:
                 r = requests.get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"ids.lens:{lens_sid}", "mailto": "research@example.com"},
+                    params={"filter": f"ids.lens:{lens_sid}", "mailto": _oa_email()},
                     timeout=10
                 )
                 if r.status_code == 200:
@@ -626,7 +631,7 @@ def list_datasets():
 # 引用トレンド取得（OpenAlex API）
 # ────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_citing_works_full(work_id: str, max_papers: int = 200):
+def fetch_citing_works_full(work_id: str, max_papers: int = 200, mailto: str = ""):
     """
     指定論文を引用している論文を、書誌結合に必要な referenced_works を含む
     完全データで取得する（被引用数順・最大 max_papers 件）。
@@ -636,6 +641,7 @@ def fetch_citing_works_full(work_id: str, max_papers: int = 200):
               "cited_by_count,referenced_works,topics")
     results, cursor = [], "*"
     per_req = min(max_papers, 200)
+    _mailto = mailto or "research@example.com"
     while len(results) < max_papers:
         params = {
             "filter":   f"cites:{short_id}",
@@ -643,7 +649,7 @@ def fetch_citing_works_full(work_id: str, max_papers: int = 200):
             "per_page": per_req,
             "cursor":   cursor,
             "select":   fields,
-            "mailto":   "research@example.com",
+            "mailto":   _mailto,
         }
         try:
             r = requests.get("https://api.openalex.org/works",
@@ -714,11 +720,13 @@ def build_coauth(works, min_links=2):
     for w in works:
         auths = []
         for a in w.get("authorships", []):
-            aid = a.get("author", {}).get("id")
-            name = a.get("author", {}).get("display_name", "")
-            if aid and name:
-                author_info[aid] = name
-                auths.append(aid)
+            aid  = a.get("author", {}).get("id", "") or ""
+            name = a.get("author", {}).get("display_name", "") or ""
+            # PubMedはIDが空 → 著者名をキーとして使用
+            key  = aid if aid else name
+            if key and name:
+                author_info[key] = name
+                auths.append(key)
         work_authors.append(auths)
     links = defaultdict(int)
     doc_count = defaultdict(int)
@@ -1102,6 +1110,57 @@ with st.sidebar:
     st.title("🔬 Research Network v2")
     st.markdown("---")
 
+    # ── API 設定（OpenAlex / Lens.org）──
+    with st.expander(tl("⚙️ API 設定", "⚙️ API Settings"), expanded=False):
+
+        # ── OpenAlex ──
+        st.markdown(f"**🔓 OpenAlex**")
+        st.caption(tl(
+            "メールアドレスを登録すると Polite Pool が適用され、レート制限が緩和されます。",
+            "Registering your email enables OpenAlex Polite Pool for better rate limits."
+        ))
+        _email_input = st.text_input(
+            tl("メールアドレス（任意）", "Email Address (optional)"),
+            value=st.session_state.get("openalex_email", ""),
+            placeholder="your@email.com",
+            key="openalex_email_input"
+        )
+        if _email_input != st.session_state.get("openalex_email", ""):
+            st.session_state["openalex_email"] = _email_input
+            st.rerun()
+        if st.session_state.get("openalex_email", ""):
+            st.success(tl(
+                f"✅ Polite Pool 有効: {st.session_state['openalex_email']}",
+                f"✅ Polite Pool active: {st.session_state['openalex_email']}"
+            ))
+        else:
+            st.info(tl("⚠️ 未設定（デフォルトPoolを使用中）", "⚠️ Not set (using default pool)"))
+
+        st.markdown("---")
+
+        # ── Lens.org ──
+        st.markdown(f"**🔑 Lens.org**")
+        st.caption(tl(
+            "特許検索（NPL引用ネットワーク）に使用します。Lens.orgで発行したAPIトークンを入力してください。",
+            "Used for patent search and NPL citation network. Enter your Lens.org API token."
+        ))
+        _lens_key_input = st.text_input(
+            tl("Lens.org APIキー", "Lens.org API Key"),
+            value=st.session_state.get("lens_api_key", ""),
+            type="password",
+            placeholder=tl("Lens.orgで発行したトークン", "Your Lens.org token"),
+            key="lens_api_key_sidebar"
+        )
+        if _lens_key_input != st.session_state.get("lens_api_key", ""):
+            st.session_state["lens_api_key"] = _lens_key_input
+            st.rerun()
+        if st.session_state.get("lens_api_key", ""):
+            st.success(tl("✅ Lens.org APIキー設定済み", "✅ Lens.org API Key configured"))
+        else:
+            st.warning(tl("⚠️ 未設定（特許検索には必須）", "⚠️ Not set (required for patent search)"))
+
+    st.markdown("---")
+
     # ステップ表示
     step = st.radio(tl("ステップ","Step"), [
         tl("① データ収集・保存","① Collect & Save"),
@@ -1123,31 +1182,32 @@ def load_topics_data():
     return []
 
 def search_openalex(query, target, max_results=50):
+    _mailto = _oa_email()
     try:
         if target in ("Title + Abstract", "タイトル＋抄録"):
             filt = "title.search:" + query
-            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=vos@example.com"
+            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=" + _mailto
             count = requests.get(count_url, timeout=15).json().get("meta",{}).get("count",0)
-            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=vos@example.com"
+            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=" + _mailto
             results = requests.get(url, timeout=20).json().get("results",[])
             return results, count, "works"
         elif target in ("Author Name", "著者名"):
-            url = "https://api.openalex.org/authors?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,works_count,last_known_institutions&mailto=vos@example.com"
+            url = "https://api.openalex.org/authors?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,works_count,last_known_institutions&mailto=" + _mailto
             results = requests.get(url, timeout=15).json().get("results",[])
             return results, len(results), "authors"
         elif target in ("Affiliation Name", "機関名"):
-            url = "https://api.openalex.org/institutions?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,ror,country_code,type,works_count&mailto=vos@example.com"
+            url = "https://api.openalex.org/institutions?search=" + query + "&per_page=" + str(max_results) + "&select=id,display_name,ror,country_code,type,works_count&mailto=" + _mailto
             results = requests.get(url, timeout=15).json().get("results",[])
             return results, len(results), "institutions"
         elif target in ("Concept", "コンセプト"):
-            c_url = "https://api.openalex.org/concepts?search=" + query + "&per_page=5&select=id,display_name,works_count&mailto=vos@example.com"
+            c_url = "https://api.openalex.org/concepts?search=" + query + "&per_page=5&select=id,display_name,works_count&mailto=" + _mailto
             concepts = requests.get(c_url, timeout=15).json().get("results",[])
             if not concepts: return [], 0, "works"
             cid = concepts[0]["id"]
             filt = "concepts.id:" + cid
-            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=vos@example.com"
+            count_url = "https://api.openalex.org/works?filter=" + filt + "&per_page=1&select=id&mailto=" + _mailto
             count = requests.get(count_url, timeout=15).json().get("meta",{}).get("count",0)
-            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=vos@example.com"
+            url = "https://api.openalex.org/works?filter=" + filt + "&per_page=" + str(max_results) + "&select=id,doi,title,publication_year,authorships&mailto=" + _mailto
             results = requests.get(url, timeout=20).json().get("results",[])
             for r in results:
                 r["_concept_name"] = concepts[0].get("display_name", query)
@@ -1473,12 +1533,16 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             "Lens.org APIを使って特許を検索し、NPL（非特許文献）引用からOpenAlexで論文を照合します。",
             "Search patents via Lens.org API and resolve NPL (non-patent literature) citations to papers via OpenAlex."
         ))
-        lens_api_key = st.text_input(
-            tl("Lens.org APIキー", "Lens.org API Key"),
-            type="password",
-            key="lens_api_key",
-            placeholder=tl("Lens.orgで発行したトークンを入力", "Enter your Lens.org token"),
-        )
+        # APIキーはサイドバーの「⚙️ API 設定」から取得
+        lens_api_key = st.session_state.get("lens_api_key", "")
+        if not lens_api_key:
+            st.warning(tl(
+                "⚠️ Lens.org APIキーが未設定です。左サイドバーの「⚙️ API 設定」から入力してください。",
+                "⚠️ Lens.org API Key not set. Please enter it in '⚙️ API Settings' in the sidebar."
+            ))
+        else:
+            st.success(tl("✅ Lens.org APIキー設定済み（サイドバーで変更可能）",
+                          "✅ Lens.org API Key configured (changeable in sidebar)"))
         lens_keyword = st.text_input(
             tl("🔍 検索キーワード（タイトル・抄録・クレーム）", "🔍 Keyword (Title / Abstract / Claim)"),
             key="lens_keyword",
@@ -1842,7 +1906,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                 try:
                     _r = requests.get(
                         f"https://api.openalex.org/institutions/{_ror_full}",
-                        params={"mailto": "research@example.com"}, timeout=10
+                        params={"mailto": _oa_email()}, timeout=10
                     )
                     _inst_data = _r.json()
                     _inst_name = _inst_data.get("display_name", "")
@@ -2051,7 +2115,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
                     r = requests.get(
                         "https://api.openalex.org/works",
                         params={"filter": ",".join(f), "per_page": 1,
-                                "select": "id", "mailto": "vos@example.com"},
+                                "select": "id", "mailto": _oa_email()},
                         timeout=15)
                     count = r.json().get("meta",{}).get("count", 0)
                     st.session_state["s1_count_result"] = count
@@ -2096,7 +2160,7 @@ if tl("① データ収集・保存","① Collect & Save") in step:
 
             dataset_name = _auto_dataset_name()
             with st.spinner(tl("OpenAlexを検索中...","Searching OpenAlex...")):
-                works = fetch_works(filters, per_page)
+                works = fetch_works(filters, per_page, mailto=_oa_email())
 
             if works:
                 path = save_dataset(dataset_name, works, meta_info)
@@ -2511,7 +2575,7 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                 f"Fetching citing papers (up to {_cite_max})..."
             )):
                 _citing_works = fetch_citing_works_full(
-                    _cite_target["id"], max_papers=_cite_max
+                    _cite_target["id"], max_papers=_cite_max, mailto=_oa_email()
                 )
             st.session_state["cite_works"] = _citing_works
 
@@ -3036,7 +3100,7 @@ function openGephiLite() {{
                             key=f"cite_btn_{rank}"
                         ):
                             with st.spinner(tl("引用論文を取得・ネットワーク構築中...","Fetching & building DOI citation network...")):
-                                _cw = fetch_citing_works_full(_wid, max_papers=200)
+                                _cw = fetch_citing_works_full(_wid, max_papers=200, mailto=_oa_email())
                                 if _cw:
                                     _vos = build_citation_network(_cw, citation_type="bibliographic_coupling", min_links=1)
                                     st.session_state[_cite_key] = {
@@ -3134,7 +3198,7 @@ function openGephiLite() {{
                                 key=f"cite_nd_{_wid2}"
                             ):
                                 with st.spinner(tl("引用論文を取得・ネットワーク構築中...","Fetching & building DOI citation network...")):
-                                    _cw2 = fetch_citing_works_full(_wid2, max_papers=200)
+                                    _cw2 = fetch_citing_works_full(_wid2, max_papers=200, mailto=_oa_email())
                                     if _cw2:
                                         _vos2 = build_citation_network(_cw2, citation_type="bibliographic_coupling", min_links=1)
                                         st.session_state[_cite_key2] = {
@@ -3311,7 +3375,7 @@ if tl("③ KAKEN助成金分析","③ KAKEN Grant Analysis") in step:
                 "sort": f"{sort_field}:desc",
                 "per_page": per_req,
                 "cursor": cursor,
-                "mailto": "research@example.com",
+                "mailto": _oa_email(),
             }
             try:
                 r = requests.get(base, params=params, timeout=20)
