@@ -2537,8 +2537,13 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
             ))
             # 論文1本選択
             if works:
+                def _paper_label(w):
+                    _t = (w.get("title", "") or w.get("id", ""))[:55]
+                    _y = w.get("publication_year") or ""
+                    return f"[{_y}]  {_t}" if _y else _t
+
                 _paper_options = {
-                    w.get("id", ""): f"{(w.get('title','') or w.get('id',''))[:60]}  ({w.get('publication_year','')})"
+                    w.get("id", ""): _paper_label(w)
                     for w in works if w.get("id")
                 }
                 _default_id = st.session_state.get("genealogy_seed_id", list(_paper_options.keys())[0])
