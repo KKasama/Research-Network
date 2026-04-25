@@ -58,12 +58,13 @@ def _oa_email():
     return st.session_state.get("openalex_email", "").strip() or "research@example.com"
 
 # ── KeyBERTモデル定義 ──
+# ※ sentence-transformers 3.x では BERT 本体モデル（scibert 等）はモダリティ検出エラーになるため
+#    sentence-transformers ネイティブのチェックポイントのみ登録する
 KEYBERT_MODELS = {
-    "SciBERT": (
-        "allenai/scibert_scivocab_uncased",
-        tl("📚 学術論文全般（推奨）", "📚 General academic papers (recommended)"),
+    "SPECTER (Academic)": (
+        "allenai-specter",
+        tl("📚 学術論文専用・高精度（推奨）", "📚 Academic papers, high accuracy (recommended)"),
     ),
-
     "MiniLM (English)": (
         "all-MiniLM-L6-v2",
         tl("🌐 英語・一般（汎用・高速）", "🌐 English, general (fast)"),
