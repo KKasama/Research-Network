@@ -2840,19 +2840,26 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
         render_genealogy_pyvis(_g_nodes, _g_edges)
 
         # テーブル表示
-        with st.expander(tl("📋 系譜ノード一覧","📋 Genealogy Node List")):
+        with st.expander(tl("📋 系譜ノード一覧","📋 Genealogy Node List"), expanded=True):
             import pandas as pd
+            _seed_wid  = st.session_state.get("genealogy_seed_id", "")
             _g_rows = []
             for nid, nd in _g_nodes.items():
-                g = nd.get("gen", 0)
+                g    = nd.get("gen", 0)
                 icon = _gen_legend.get(g, ("⚪","",""))[0]
+                is_seed = (nid == _seed_wid)
                 _g_rows.append({
-                    tl("世代","Gen"): f"{icon} Gen {g}",
-                    tl("タイトル","Title"): nd.get("title", "")[:80],
-                    tl("年","Year"): nd.get("year", ""),
-                    "OpenAlex ID": nid,
+                    "_gen_num": g,
+                    tl("世代","Gen"):      f"{icon} Gen {g}",
+                    tl("種別","Type"):     tl("⭐ 起点論文","⭐ Seed paper") if is_seed else tl(f"第{g}世代引用","Gen {g} reference").format(g=g),
+                    tl("タイトル","Title"): nd.get("title", "")[:100],
+                    tl("年","Year"):       nd.get("year", ""),
+                    "OpenAlex ID":         nid,
                 })
-            _g_rows.sort(key=lambda r: r[tl("世代","Gen")])
+            # 世代番号で正しく昇順ソート（Gen 0 → 1 → 2 → 3）
+            _g_rows.sort(key=lambda r: (r["_gen_num"], 0 if r[tl("種別","Type")].startswith("⭐") else 1))
+            for r in _g_rows:
+                del r["_gen_num"]
             st.dataframe(pd.DataFrame(_g_rows), use_container_width=True, hide_index=True)
 
     # ── DOI引用ネットワーク（ページ上部に表示）──
