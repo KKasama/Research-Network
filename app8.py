@@ -3015,24 +3015,41 @@ function openGephiLite() {{
                         st.session_state.pop(_k, None)
                     st.rerun()
 
-        # ── 重要論文ランキング（被引用数） ──
+        # ── 重要論文ランキング（被引用数 / 出版年） ──
         st.markdown("---")
-        st.subheader(tl("📄 重要論文ランキング（被引用数順）",
-                        "📄 Key Papers Ranking (by citation count)"))
-        st.caption(tl(
-            "ネットワーク分析に依存せず、データセット内の論文を**被引用数**で直接ランキングします。"
-            "論文数が少ない場合でも信頼性の高い重要度指標です。",
-            "Ranks papers directly by **citation count**, independent of network analysis. "
-            "A reliable importance measure even with smaller datasets."
-        ))
-        st.caption(tl(
-            "💰 **研究費対被引用コスト（Funding Cost per Citation）の推定**: "
-            "ステップ3のKAKENデータで取得した助成金額をこの表の被引用数で割ることで、"
-            "「1被引用あたりの研究費」を概算できます。研究費対効果の評価指標として活用してください。",
-            "💰 **Funding Cost per Citation**: Divide the grant amount from Step 3 KAKEN data "
-            "by the citation counts in this table to estimate the cost per citation. "
-            "Use this as a proxy metric for research funding efficiency."
-        ))
+
+        # 被引用数が全件0かどうか判定（PubMed等、被引用数未取得データの検出）
+        _all_cited = [w.get("cited_by_count", 0) or 0 for w in works]
+        _no_citation_data = all(c == 0 for c in _all_cited)
+        _is_pubmed_src = any(w.get("_source") == "pubmed" for w in works)
+
+        if _no_citation_data:
+            st.subheader(tl("📄 論文一覧（出版年順）",
+                            "📄 Papers List (by publication year)"))
+            st.warning(tl(
+                "⚠️ このデータセットは被引用数を取得できません（PubMedデータ）。"
+                "被引用数はすべて0のため、ランキングは無意味です。代わりに**出版年（新しい順）**で表示します。",
+                "⚠️ Citation counts are unavailable for this dataset (PubMed data). "
+                "All values are 0, so ranking by citations is meaningless. "
+                "Showing papers sorted by **publication year (newest first)** instead."
+            ))
+        else:
+            st.subheader(tl("📄 重要論文ランキング（被引用数順）",
+                            "📄 Key Papers Ranking (by citation count)"))
+            st.caption(tl(
+                "ネットワーク分析に依存せず、データセット内の論文を**被引用数**で直接ランキングします。"
+                "論文数が少ない場合でも信頼性の高い重要度指標です。",
+                "Ranks papers directly by **citation count**, independent of network analysis. "
+                "A reliable importance measure even with smaller datasets."
+            ))
+            st.caption(tl(
+                "💰 **研究費対被引用コスト（Funding Cost per Citation）の推定**: "
+                "ステップ3のKAKENデータで取得した助成金額をこの表の被引用数で割ることで、"
+                "「1被引用あたりの研究費」を概算できます。研究費対効果の評価指標として活用してください。",
+                "💰 **Funding Cost per Citation**: Divide the grant amount from Step 3 KAKEN data "
+                "by the citation counts in this table to estimate the cost per citation. "
+                "Use this as a proxy metric for research funding efficiency."
+            ))
 
         import pandas as pd
         _top_n_papers = st.slider(
@@ -3041,7 +3058,7 @@ function openGephiLite() {{
         _paper_rows = []
         for w in works:
             title  = w.get("title","") or "No title"
-            year   = w.get("publication_year","")
+            year   = w.get("publication_year","") or 0
             cited  = w.get("cited_by_count", 0) or 0
             doi    = w.get("doi","") or ""
             auths  = [a.get("author",{}).get("display_name","")
@@ -3056,18 +3073,28 @@ function openGephiLite() {{
                 "DOI":                    doi,
             })
 
+        # 被引用数データなし → 出版年順、あり → 被引用数順
+        _sort_col = tl("年","Year") if _no_citation_data else tl("被引用数","Cited")
         _papers_df = (
             pd.DataFrame(_paper_rows)
-            .sort_values(tl("被引用数","Cited"), ascending=False)
+            .sort_values(_sort_col, ascending=False)
             .reset_index(drop=True)
         )
         _papers_df.index = _papers_df.index + 1  # 1始まり
 
-        # 上位N件をテーブル表示
-        st.dataframe(
-            _papers_df.head(_top_n_papers).drop(columns=["DOI"]),
-            use_container_width=True
+        # 被引用数が全0の場合は列を非表示
+        _display_cols = (
+            [tl("タイトル","Title"), tl("著者","Authors"), tl("年","Year"), tl("トピック","Topics")]
+            if _no_citation_data
+            else None
         )
+
+        # 上位N件をテーブル表示
+        _show_df = _papers_df.head(_top_n_papers)
+        if _display_cols:
+            st.dataframe(_show_df[_display_cols], use_container_width=True)
+        else:
+            st.dataframe(_show_df.drop(columns=["DOI"]), use_container_width=True)
 
         # 詳細エキスパンダー
         for rank, row in _papers_df.head(_top_n_papers).iterrows():
