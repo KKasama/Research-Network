@@ -3640,6 +3640,17 @@ function openGephiLite() {{
                 use_container_width=True, hide_index=True
             )
 
+            # 全指標の説明を凡例として表示
+            with st.expander(tl("📖 指標の説明","📖 Metric Descriptions"), expanded=False):
+                st.markdown(tl(
+                    "- **PageRank**：重要なノードからリンクされているほど高スコア。学術的影響力の高い著者・論文を特定します。\n"
+                    "- **媒介中心性 (Betweenness)**：他のノード間の最短経路上に多く現れるノードほど高スコア。異なる研究グループを橋渡しするハブ的存在を示します。\n"
+                    "- **次数中心性 (Degree)**：直接つながっているノードの数（最大値で正規化）。最も多くの著者・論文と直接接続しているノードを示します。",
+                    "- **PageRank**: Higher score when linked from important nodes. Identifies highly influential authors/papers.\n"
+                    "- **Betweenness Centrality**: Higher score for nodes that frequently appear on shortest paths between others. Identifies bridges connecting different research groups.\n"
+                    "- **Degree Centrality**: Number of direct connections (normalized by max). Shows nodes with the most direct links to other authors/papers."
+                ))
+
             # ── KAKEN助成金分析へ引き渡し ──
             st.markdown("---")
             _ana_label_s2 = st.session_state.get("analysis_type", "")
