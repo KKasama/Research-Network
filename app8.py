@@ -710,6 +710,29 @@ def compute_centrality(vos_data):
     return result
 
 # ────────────────────────────────────────────
+# TF-IDF キーワード抽出（BERT フォールバック）
+# ────────────────────────────────────────────
+def extract_keywords_tfidf(texts, wids, top_n=5):
+    """sklearn TF-IDF によるキーワード抽出。BERT が使えない場合のフォールバック。"""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    try:
+        vec = TfidfVectorizer(
+            ngram_range=(1, 2), max_features=5000,
+            stop_words="english", min_df=1,
+        )
+        mat  = vec.fit_transform(texts)
+        names = vec.get_feature_names_out()
+        result = {}
+        for i, wid in enumerate(wids):
+            row = mat[i].toarray()[0]
+            top_idx = row.argsort()[-top_n:][::-1]
+            result[wid] = [names[j] for j in top_idx if row[j] > 0]
+        return result
+    except Exception:
+        return {wid: [] for wid in wids}
+
+
+# ────────────────────────────────────────────
 # ネットワーク構築
 # ────────────────────────────────────────────
 def build_coauth(works, min_links=2):
@@ -2985,17 +3008,27 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
 
             _total_kws = sum(len(v) for v in work_keywords.values())
             if _total_kws == 0:
-                st.error(tl(
-                    f"⚠️ キーワードが1語も抽出できませんでした（モデル: {model_name}）。\n\n"
-                    f"**原因**: {_first_err}\n\n"
-                    "**対処法**: このモデルは sentence-transformers との互換性に問題がある可能性があります。"
-                    "サイドバーで **SciBERT** または **MiniLM (English)** に切り替えてください。",
-                    f"⚠️ No keywords extracted (model: {model_name}).\n\n"
-                    f"**Cause**: {_first_err}\n\n"
-                    "**Fix**: This model may be incompatible with your sentence-transformers version. "
-                    "Please switch to **SciBERT** or **MiniLM (English)** in the sidebar."
+                # BERT 完全失敗 → TF-IDF で自動フォールバック
+                st.warning(tl(
+                    f"⚠️ {model_name} でキーワードを抽出できませんでした（sentence-transformers との互換性問題）。"
+                    "**TF-IDF** に自動切り替えして抽出します。",
+                    f"⚠️ {model_name} failed to extract keywords (sentence-transformers compatibility issue). "
+                    "Automatically switching to **TF-IDF** extraction."
                 ))
-                st.stop()
+                with st.spinner(tl("TF-IDF でキーワード抽出中...","Extracting keywords with TF-IDF...")):
+                    work_keywords = extract_keywords_tfidf(_texts, _wids, top_n=5)
+                st.session_state[_kw_cache_key] = work_keywords
+                _total_kws = sum(len(v) for v in work_keywords.values())
+                if _total_kws == 0:
+                    st.error(tl(
+                        "TF-IDF でも抽出できませんでした。テキストデータを確認してください。",
+                        "TF-IDF also failed. Please check the text data."
+                    ))
+                    st.stop()
+                st.success(tl(
+                    f"✅ TF-IDF でキーワード抽出完了: {_total_kws}語",
+                    f"✅ Keywords extracted via TF-IDF: {_total_kws}"
+                ))
             else:
                 st.success(tl(
                     f"キーワード抽出完了: {_total_kws}語 [{model_name}]",
