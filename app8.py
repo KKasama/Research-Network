@@ -2224,12 +2224,12 @@ else:
 
 | # | シナリオ | 推奨手法 | ステップ |
 |---|----------|----------|----------|
-| 1 | **研究コミュニティの把握**<br>誰が中心的な研究者か、どのグループが存在するか | 共著ネットワーク → 中心性ランキング | Step2 |
-| 2 | **研究トレンドの発見**<br>どのトピックが急成長しているか | BERTopic / K-means クラスタリング → ホワイトスペース可視化 | Step2 |
-| 3 | **ホワイトスペース（空白領域）の特定**<br>論文数が少なく引用が高いニッチ分野を発見 | BERTopic / K-means → ホワイトスペース散布図 | Step2 |
-| 4 | **国際動向の比較**<br>どの国が主導しているか | 国別論文数グラフ（Step2） + 国フィルタ（Step1） | Step1+2 |
-| 5 | **重要論文・ハブの特定**<br>最も影響力のある論文・研究者は誰か | KeyBERT共起 → PageRankランキング + 重要論文ランキング | Step2 |
-| 6 | **研究費対効果の評価**<br>助成金と論文アウトカムの関係 | KAKEN分析 + 重要論文の被引用数（費用対効果の推定） | Step2+3 |
+| 1 | **研究コミュニティの把握** 誰が中心的な研究者か、どのグループが存在するか | 共著ネットワーク → 中心性ランキング | Step2 |
+| 2 | **研究トレンドの発見** どのトピックが急成長しているか | BERTopic / K-means クラスタリング → ホワイトスペース可視化 | Step2 |
+| 3 | **ホワイトスペース（空白領域）の特定** 論文数が少なく引用が高いニッチ分野を発見 | BERTopic / K-means → ホワイトスペース散布図 | Step2 |
+| 4 | **国際動向の比較** どの国が主導しているか | 国別論文数グラフ（Step2） + 国フィルタ（Step1） | Step1+2 |
+| 5 | **重要論文・ハブの特定** 最も影響力のある論文・研究者は誰か | KeyBERT共起 → PageRankランキング + 重要論文ランキング | Step2 |
+| 6 | **研究費対効果の評価** 助成金と論文アウトカムの関係 | KAKEN分析 + 重要論文の被引用数（費用対効果の推定） | Step2+3 |
 
 > 💡 **ヒント**: シナリオ3の「ホワイトスペース」は BERTopic または K-means 実行後に自動表示されます。
 """,
@@ -2237,12 +2237,12 @@ else:
 
 | # | Scenario | Recommended Features | Step |
 |---|----------|----------------------|------|
-| 1 | **Map the research community**<br>Who are the key researchers? What groups exist? | Co-authorship network → Centrality ranking | Step 2 |
-| 2 | **Discover research trends**<br>Which topics are growing fast? | BERTopic / K-means clustering → White Space viz | Step 2 |
-| 3 | **Identify white spaces**<br>Find niches with few papers but high citation impact | BERTopic / K-means → White Space scatter plot | Step 2 |
-| 4 | **International comparison**<br>Which countries lead the field? | Papers-by-country chart (Step 2) + country filter (Step 1) | Step 1+2 |
-| 5 | **Find key papers & hubs**<br>Most influential papers and researchers | KeyBERT co-occurrence → PageRank + Key Papers ranking | Step 2 |
-| 6 | **Evaluate research funding ROI**<br>Relationship between grants and publication outcomes | KAKEN analysis + citation counts (funding cost per citation) | Step 2+3 |
+| 1 | **Map the research community** Who are the key researchers? What groups exist? | Co-authorship network → Centrality ranking | Step 2 |
+| 2 | **Discover research trends** Which topics are growing fast? | BERTopic / K-means clustering → White Space viz | Step 2 |
+| 3 | **Identify white spaces** Find niches with few papers but high citation impact | BERTopic / K-means → White Space scatter plot | Step 2 |
+| 4 | **International comparison** Which countries lead the field? | Papers-by-country chart (Step 2) + country filter (Step 1) | Step 1+2 |
+| 5 | **Find key papers & hubs** Most influential papers and researchers | KeyBERT co-occurrence → PageRank + Key Papers ranking | Step 2 |
+| 6 | **Evaluate research funding ROI** Relationship between grants and publication outcomes | KAKEN analysis + citation counts (funding cost per citation) | Step 2+3 |
 
 > 💡 **Tip**: The "White Space" scatter plot for Scenario 3 appears automatically after running BERTopic or K-means analysis.
 """
