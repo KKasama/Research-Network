@@ -2953,13 +2953,30 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                         _texts.append(text)
 
                 with st.spinner(tl(
-                    f"KeyBERT でキーワード抽出中... {len(_texts)}件 [{model_name}]（バッチ処理）",
-                    f"Extracting keywords... {len(_texts)} papers [{model_name}] (batch)"
+                    f"KeyBERT でキーワード抽出中... {len(_texts)}件 [{model_name}]",
+                    f"Extracting keywords... {len(_texts)} papers [{model_name}]"
                 )):
                     kw_model = KeyBERT(model=model_key)
-                    _all_kws = kw_model.extract_keywords(
-                        _texts, keyphrase_ngram_range=(1, 2), top_n=5
-                    )
+                    # sentence-transformers 3.x でバッチ処理が
+                    # "Modality 'audio'" エラーを起こす場合があるため
+                    # バッチ → 失敗したら1件ずつにフォールバック
+                    try:
+                        _all_kws = kw_model.extract_keywords(
+                            _texts, keyphrase_ngram_range=(1, 2), top_n=5
+                        )
+                    except (ValueError, TypeError):
+                        _all_kws = []
+                        _prog = st.progress(0)
+                        for _i, _t in enumerate(_texts):
+                            try:
+                                _kw = kw_model.extract_keywords(
+                                    _t, keyphrase_ngram_range=(1, 2), top_n=5
+                                )
+                            except Exception:
+                                _kw = []
+                            _all_kws.append(_kw)
+                            _prog.progress((_i + 1) / len(_texts))
+                        _prog.empty()
 
                 work_keywords = {wid: [k for k, _ in kws]
                                  for wid, kws in zip(_wids, _all_kws)}
