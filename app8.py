@@ -1051,6 +1051,82 @@ def build_forward_citation_genealogy(seed_works, generations=3, max_per_gen=20, 
     return all_nodes, all_edges
 
 
+def match_papers_patents_by_doi(works, patents):
+    """論文リスト×特許リストのNPL引用をDOIで照合し、マッチペアリストを返す"""
+    doi_pat = re.compile(r'10\.\d{4,9}/[^\s,;"\']+(?=[,\s"\']|$)')
+
+    def norm_doi(d):
+        return (d or "").replace("https://doi.org/","").replace("http://doi.org/","").lower().strip().rstrip("./,")
+
+    paper_by_doi = {}
+    for w in works:
+        d = norm_doi(w.get("doi",""))
+        if d:
+            paper_by_doi[d] = w
+
+    pairs, seen = [], set()
+    for pat in patents:
+        for npl in pat.get("npl_citations", []):
+            d = norm_doi(npl.get("doi",""))
+            if not d:
+                m = doi_pat.search(npl.get("text",""))
+                if m:
+                    d = norm_doi(m.group(0))
+            if d and d in paper_by_doi:
+                key = (pat.get("lens_id",""), d)
+                if key not in seen:
+                    seen.add(key)
+                    pairs.append({
+                        "patent": pat,
+                        "paper":  paper_by_doi[d],
+                        "npl_text": npl.get("text",""),
+                    })
+    return pairs
+
+
+def render_bipartite_pyvis(pairs):
+    """論文-特許 二部有向グラフを PyVis で描画（特許→論文）"""
+    try:
+        from pyvis.network import Network
+        import tempfile
+
+        net = Network(height="620px", width="100%", bgcolor="#f9f9f9",
+                      font_color="#333333", directed=True)
+        net.barnes_hut(gravity=-4000, central_gravity=0.1, spring_length=240)
+
+        added_papers, added_patents = set(), set()
+        for pair in pairs:
+            pat    = pair["patent"]
+            paper  = pair["paper"]
+            pat_nid   = "PAT_" + pat.get("lens_id","?")
+            paper_nid = "PAP_" + (paper.get("doi","") or paper.get("id","?"))
+
+            if pat_nid not in added_patents:
+                added_patents.add(pat_nid)
+                yr  = (pat.get("date_published","") or "")[:4]
+                lbl = (pat.get("title","") or pat.get("lens_id",""))[:28]
+                net.add_node(pat_nid, label=lbl, color="#E07820", shape="square", size=22,
+                             title=f"🔧 {pat.get('title','')} [{yr}]\n{pat.get('lens_id','')}")
+
+            if paper_nid not in added_papers:
+                added_papers.add(paper_nid)
+                yr  = str(paper.get("publication_year","") or "")
+                lbl = (paper.get("title","") or "")[:28]
+                net.add_node(paper_nid, label=lbl, color="#4477CC", shape="dot", size=18,
+                             title=f"📄 {paper.get('title','')} [{yr}]\nDOI: {paper.get('doi','')}")
+
+            net.add_edge(pat_nid, paper_nid, arrows="to", color="#aaaaaa", width=1.5)
+
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
+            net.save_graph(f.name)
+            html_content = open(f.name).read()
+        st.components.v1.html(html_content, height=640, scrolling=False)
+
+    except ImportError:
+        st.warning(tl("pyvis 未インストール。`pip install pyvis`",
+                      "pyvis not installed. Run `pip install pyvis`."))
+
+
 def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     """BERTopicでトピッククラスタリング → ネットワーク化"""
     import html as _html
@@ -3799,67 +3875,178 @@ function openGephiLite() {{
                     st.session_state["sel_node"] = None
                     st.rerun()
 
-        # ── 特許×論文ネットワーク（Lens.orgデータセットのみ）──
-        _patents_in_ds = data.get("patents", [])
-        if _patents_in_ds:
-            st.markdown("---")
-            st.subheader(tl("🔬 特許×論文 ネットワーク", "🔬 Patent × Paper Network"))
-            st.caption(tl(
-                "特許のNPL引用から照合された論文とのリンクを VOSviewer JSON 形式でエクスポートします。",
-                "Export patent-to-paper NPL citation links as VOSviewer JSON."
-            ))
+        # ── 特許×論文 引用ブリッジ（Lens.orgデータセット内照合 + クロスデータセット）──
+        st.markdown("---")
+        st.subheader(tl("📑 論文-特許 引用ブリッジ分析", "📑 Paper-Patent Citation Bridge"))
+        st.caption(tl(
+            "特許のNPL引用（非特許文献）と論文のDOIを照合し、どの特許がどの論文を引用しているかを可視化します。",
+            "Matches patent NPL citations against paper DOIs to reveal which patents cite which papers."
+        ))
 
-            _pat_n = len(_patents_in_ds)
-            _paper_n = len(works)
-            _npl_total = sum(len(p.get("npl_citations", [])) for p in _patents_in_ds)
-            _pm1, _pm2, _pm3 = st.columns(3)
-            _pm1.metric(tl("特許数", "Patents"), _pat_n)
-            _pm2.metric(tl("照合論文数", "Resolved papers"), _paper_n)
-            _pm3.metric(tl("NPL引用（合計）", "NPL citations (total)"), _npl_total)
+        _bridge_tab1, _bridge_tab2 = st.tabs([
+            tl("🔁 同一データセット照合","🔁 Within Dataset"),
+            tl("🔀 クロスデータセット照合","🔀 Cross-Dataset"),
+        ])
+
+        # ── タブ1: 同一データセット（Lens.orgデータのみ）──
+        with _bridge_tab1:
+            _patents_in_ds = data.get("patents", [])
+            if not _patents_in_ds:
+                st.info(tl(
+                    "このデータセットには特許データが含まれていません。"
+                    "Lens.orgで収集したデータセットを選択してください。",
+                    "No patent data in this dataset. Please select a Lens.org dataset."
+                ))
+            else:
+                _pat_n    = len(_patents_in_ds)
+                _paper_n  = len(works)
+                _npl_total = sum(len(p.get("npl_citations", [])) for p in _patents_in_ds)
+                _bm1, _bm2, _bm3 = st.columns(3)
+                _bm1.metric(tl("特許数","Patents"), _pat_n)
+                _bm2.metric(tl("照合論文数","Resolved papers"), _paper_n)
+                _bm3.metric(tl("NPL引用合計","NPL citations"), _npl_total)
+
+                if st.button(
+                    tl("▶ 引用ブリッジ照合を実行","▶ Run Citation Bridge Matching"),
+                    type="primary", key="run_bridge_same", use_container_width=True,
+                ):
+                    with st.spinner(tl("DOI照合中...","Matching by DOI...")):
+                        _pairs = match_papers_patents_by_doi(works, _patents_in_ds)
+                    st.session_state["bridge_pairs_same"] = _pairs
+
+                _pairs = st.session_state.get("bridge_pairs_same")
+                if _pairs is not None:
+                    if not _pairs:
+                        st.warning(tl(
+                            "照合結果: 0件。NPL引用のDOIと論文のDOIが一致しませんでした。",
+                            "No matches found. NPL citation DOIs did not match any paper DOIs."
+                        ))
+                    else:
+                        st.success(tl(
+                            f"✅ {len(_pairs)}件の引用関係が見つかりました（特許→論文）",
+                            f"✅ Found {len(_pairs)} citation link(s) (patent → paper)"
+                        ))
+                        st.caption(tl(
+                            "🟠 四角＝特許 　🔵 円＝論文　矢印の向き: 特許 → 引用されている論文",
+                            "🟠 Square=Patent  🔵 Circle=Paper  Arrow: Patent → cited paper"
+                        ))
+                        render_bipartite_pyvis(_pairs)
+
+                        # 照合テーブル
+                        with st.expander(tl("📋 照合結果一覧","📋 Match List"), expanded=False):
+                            import pandas as pd
+                            _tbl = []
+                            for pr in _pairs:
+                                _tbl.append({
+                                    tl("特許タイトル","Patent Title"):
+                                        (pr["patent"].get("title","") or "")[:60],
+                                    tl("出願年","Year"):
+                                        (pr["patent"].get("date_published","") or "")[:4],
+                                    tl("管轄","Jurisdiction"):
+                                        pr["patent"].get("jurisdiction",""),
+                                    tl("論文タイトル","Paper Title"):
+                                        (pr["paper"].get("title","") or "")[:60],
+                                    tl("論文年","Pub Year"):
+                                        str(pr["paper"].get("publication_year","") or ""),
+                                    "DOI": pr["paper"].get("doi",""),
+                                })
+                            st.dataframe(pd.DataFrame(_tbl), use_container_width=True, hide_index=True)
+
+                        # VOSviewer JSON
+                        with st.spinner(tl("VOSviewerデータ生成中...","Generating VOSviewer JSON...")):
+                            _pp_net = build_patent_paper_network(_patents_in_ds, works)
+                        _pp_json = json.dumps({"network": _pp_net}, ensure_ascii=False, indent=2)
+                        _pp_fname = re.sub(r"[^\w]","_", selected_ds[:30]) + "_bridge.json"
+                        st.download_button(
+                            tl("📥 VOSviewer JSON ダウンロード","📥 Download VOSviewer JSON"),
+                            data=_pp_json.encode("utf-8"),
+                            file_name=_pp_fname, mime="application/json",
+                            key="dl_bridge_same",
+                        )
+
+        # ── タブ2: クロスデータセット照合 ──
+        with _bridge_tab2:
+            st.caption(tl(
+                "論文データセット（OpenAlex）と特許データセット（Lens.org）を別々に選択して照合できます。",
+                "Select a paper dataset (OpenAlex) and a patent dataset (Lens.org) separately to cross-match."
+            ))
+            _all_ds = list_datasets()
+            _cx_col1, _cx_col2 = st.columns(2)
+            with _cx_col1:
+                _cx_paper_ds = st.selectbox(
+                    tl("📄 論文データセット","📄 Paper dataset"),
+                    _all_ds, key="cx_paper_ds",
+                )
+            with _cx_col2:
+                _cx_patent_ds = st.selectbox(
+                    tl("🔧 特許データセット（Lens.org）","🔧 Patent dataset (Lens.org)"),
+                    _all_ds, key="cx_patent_ds",
+                )
 
             if st.button(
-                tl("▶ 特許×論文ネットワーク構築 & ダウンロード",
-                   "▶ Build Patent×Paper Network & Download"),
-                type="primary", key="build_patent_network",
-                use_container_width=True,
+                tl("▶ クロス照合を実行","▶ Run Cross-Dataset Matching"),
+                type="primary", key="run_bridge_cross", use_container_width=True,
             ):
-                with st.spinner(tl("特許×論文ネットワークを構築中...",
-                                   "Building patent×paper network...")):
-                    _pp_net = build_patent_paper_network(_patents_in_ds, works)
-
-                _pp_items = _pp_net.get("items", [])
-                _pp_links = _pp_net.get("links", [])
-                _pp_patents = [i for i in _pp_items if i.get("cluster") == 1]
-                _pp_papers  = [i for i in _pp_items if i.get("cluster") == 2]
-
-                st.success(tl(
-                    f"✅ ノード: 特許 {len(_pp_patents)}件 / 論文 {len(_pp_papers)}件  "
-                    f"/ エッジ: {len(_pp_links)}件",
-                    f"✅ Nodes: {len(_pp_patents)} patents / {len(_pp_papers)} papers  "
-                    f"/ Edges: {len(_pp_links)}"
-                ))
-
-                if _pp_items:
-                    _pp_json = json.dumps({"network": _pp_net}, ensure_ascii=False, indent=2)
-                    _pp_fname = re.sub(r"[^\w]", "_", selected_ds[:30]) + "_patent_paper.json"
-                    st.download_button(
-                        tl("📥 VOSviewer JSON ダウンロード（特許×論文）",
-                           "📥 Download VOSviewer JSON (Patent×Paper)"),
-                        data=_pp_json.encode("utf-8"),
-                        file_name=_pp_fname,
-                        mime="application/json",
-                        type="primary",
-                        key="dl_patent_paper_net",
-                    )
-                    st.info(tl(
-                        "💡 VOSviewerで開いて Cluster 1（特許）と Cluster 2（論文）の色分けを確認できます。",
-                        "💡 Open in VOSviewer to see Cluster 1 (patents) and Cluster 2 (papers) colored separately."
+                _cx_paper_data  = load_dataset(_cx_paper_ds)
+                _cx_patent_data = load_dataset(_cx_patent_ds)
+                _cx_papers  = (_cx_paper_data  or {}).get("works", [])
+                _cx_patents = (_cx_patent_data or {}).get("patents", [])
+                if not _cx_patents:
+                    st.error(tl(
+                        "選択した特許データセットに特許データがありません。Lens.orgで収集したデータセットを選んでください。",
+                        "Selected patent dataset has no patents. Choose a dataset collected from Lens.org."
                     ))
                 else:
+                    with st.spinner(tl("クロス照合中...","Cross-matching...")):
+                        _cx_pairs = match_papers_patents_by_doi(_cx_papers, _cx_patents)
+                    st.session_state["bridge_pairs_cross"] = _cx_pairs
+                    st.session_state["bridge_cross_meta"]  = {
+                        "paper_ds": _cx_paper_ds, "patent_ds": _cx_patent_ds,
+                        "n_papers": len(_cx_papers), "n_patents": len(_cx_patents),
+                    }
+
+            _cx_pairs = st.session_state.get("bridge_pairs_cross")
+            _cx_meta  = st.session_state.get("bridge_cross_meta", {})
+            if _cx_pairs is not None:
+                if _cx_meta:
+                    st.caption(
+                        f"📄 {_cx_meta.get('paper_ds','')} ({_cx_meta.get('n_papers',0)} papers)  ×  "
+                        f"🔧 {_cx_meta.get('patent_ds','')} ({_cx_meta.get('n_patents',0)} patents)"
+                    )
+                if not _cx_pairs:
                     st.warning(tl(
-                        "リンクが見つかりませんでした。DOIが抽出されなかった可能性があります。",
-                        "No links found. DOIs may not have been extracted from NPL citations."
+                        "照合結果: 0件。2つのデータセット間に引用関係が見つかりませんでした。",
+                        "No matches. No citation links found between the two datasets."
                     ))
+                else:
+                    st.success(tl(
+                        f"✅ {len(_cx_pairs)}件の引用関係（特許→論文）",
+                        f"✅ {len(_cx_pairs)} citation link(s) (patent → paper)"
+                    ))
+                    st.caption(tl(
+                        "🟠 四角＝特許 　🔵 円＝論文　矢印の向き: 特許 → 引用されている論文",
+                        "🟠 Square=Patent  🔵 Circle=Paper  Arrow: Patent → cited paper"
+                    ))
+                    render_bipartite_pyvis(_cx_pairs)
+
+                    with st.expander(tl("📋 照合結果一覧","📋 Match List"), expanded=False):
+                        import pandas as pd
+                        _cx_tbl = []
+                        for pr in _cx_pairs:
+                            _cx_tbl.append({
+                                tl("特許タイトル","Patent Title"):
+                                    (pr["patent"].get("title","") or "")[:60],
+                                tl("出願年","Year"):
+                                    (pr["patent"].get("date_published","") or "")[:4],
+                                tl("管轄","Jurisdiction"):
+                                    pr["patent"].get("jurisdiction",""),
+                                tl("論文タイトル","Paper Title"):
+                                    (pr["paper"].get("title","") or "")[:60],
+                                tl("論文年","Pub Year"):
+                                    str(pr["paper"].get("publication_year","") or ""),
+                                "DOI": pr["paper"].get("doi",""),
+                            })
+                        st.dataframe(pd.DataFrame(_cx_tbl), use_container_width=True, hide_index=True)
 
 # ════════════════════════════════════════════
 # ステップ3: KAKEN助成金分析
