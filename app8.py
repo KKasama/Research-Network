@@ -2075,6 +2075,39 @@ if tl("① データ収集・保存","① Collect & Save") in step:
             else:
                 st.info(tl("まだ選択なし","None selected"))
 
+        # ── トピック名検索（キーワードで全件から直接検索）──
+        st.markdown("---")
+        st.markdown(tl("**🔍 トピック名で直接検索**","**🔍 Search Topics by Name**"))
+        st.caption(tl(
+            "ブラウズが難しい場合は、トピック名のキーワードで全件から直接検索できます。",
+            "If browsing is difficult, search all topics directly by keyword."
+        ))
+        _direct_kw = st.text_input(
+            tl("トピック名を入力","Enter topic name"),
+            key="s1_direct_search",
+            placeholder=tl("例: machine learning, cancer immunotherapy","e.g. machine learning, cancer immunotherapy"),
+        )
+        if _direct_kw:
+            _direct_results = [
+                t_ for t_ in topics_all
+                if _direct_kw.lower() in t_["display_name"].lower()
+            ]
+            st.caption(f"**{len(_direct_results)}** " + tl("件ヒット（チェックで選択）","results — check to select"))
+            for t_ in _direct_results[:100]:
+                _tid   = t_["id"].replace("https://openalex.org/T", "")
+                _label = t_["display_name"]
+                _dom   = t_.get("domain",  {}).get("display_name", "")
+                _fld   = t_.get("field",   {}).get("display_name", "")
+                _sub   = t_.get("subfield",{}).get("display_name", "")
+                _path  = " › ".join(p for p in [_dom, _fld, _sub] if p)
+                _checked = _label in st.session_state.s1_selected_topics
+                if st.checkbox(f"{_label}　　`{_path}`", value=_checked, key="s1_ds_" + _tid):
+                    if _label not in st.session_state.s1_selected_topics:
+                        st.session_state.s1_selected_topics.append(_label)
+                else:
+                    if _label in st.session_state.s1_selected_topics:
+                        st.session_state.s1_selected_topics.remove(_label)
+
     # ══════════════════════════════════════════
     # STEP B: キーワード・著者・機関で絞り込み（任意）
     # ══════════════════════════════════════════
