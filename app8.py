@@ -2668,9 +2668,12 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
             # ── 論文1本選択 ──
             if works:
                 def _paper_label(w):
-                    _t = (w.get("title", "") or w.get("id", ""))[:55]
-                    _y = w.get("publication_year") or ""
-                    return f"[{_y}]  {_t}" if _y else _t
+                    _t  = (w.get("title", "") or w.get("id", ""))[:50]
+                    _y  = w.get("publication_year") or ""
+                    _c  = w.get("cited_by_count") or 0
+                    _yp = f"[{_y}]" if _y else ""
+                    _cp = f"被引用{_c}件" if lang == "ja" else f"cited {_c}"
+                    return f"{_yp} {_cp}  {_t}".strip()
 
                 _paper_options = {
                     w.get("id", ""): _paper_label(w)
@@ -3016,7 +3019,25 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
             f"(Arrow direction: paper → its reference)"
         ))
 
-        render_genealogy_pyvis(_g_nodes, _g_edges)
+        # 引用なし・参照なし のケースを明示
+        _non_seed_count = sum(1 for nd in _g_nodes.values() if nd.get("gen", 0) > 0)
+        if _non_seed_count == 0:
+            if _g_direction == "forward":
+                st.warning(tl(
+                    "⚠️ この論文を引用している論文が OpenAlex に登録されていません。"
+                    "出版直後の論文や被引用数が0の論文では被引用系譜は表示できません。",
+                    "⚠️ No papers citing this work were found in OpenAlex. "
+                    "Very recent papers or works with 0 citations will show no forward genealogy."
+                ))
+            else:
+                st.warning(tl(
+                    "⚠️ この論文の参考文献データが OpenAlex に登録されていません。"
+                    "参考文献リストが取得できないため引用系譜を表示できません。",
+                    "⚠️ No reference data found for this paper in OpenAlex. "
+                    "Cannot build backward genealogy without reference lists."
+                ))
+        else:
+            render_genealogy_pyvis(_g_nodes, _g_edges)
 
         # テーブル表示
         with st.expander(tl("📋 系譜ノード一覧","📋 Genealogy Node List"), expanded=True):
