@@ -824,6 +824,160 @@ def build_citation_network(works, citation_type="bibliographic_coupling", min_li
     ]
     return {"items": items, "links": link_list_int}
 
+
+# ────────────────────────────────────────────
+# 引用系譜（Citation Genealogy）
+# ────────────────────────────────────────────
+def fetch_referenced_works_batch(work_ids, mailto=""):
+    """OpenAlex ID リストから論文データをバッチ取得（最大50件/リクエスト）"""
+    if not work_ids:
+        return {}
+    results = {}
+    id_list = [wid for wid in work_ids if wid]
+    chunk_size = 50
+    for i in range(0, len(id_list), chunk_size):
+        chunk = id_list[i:i + chunk_size]
+        short_ids = []
+        for wid in chunk:
+            m = re.search(r'(W\d+)', str(wid))
+            if m:
+                short_ids.append(m.group(1))
+        if not short_ids:
+            continue
+        params = {
+            "filter": f"openalex:{'|'.join(short_ids)}",
+            "per-page": chunk_size,
+            "select": "id,title,publication_year,doi,cited_by_count,authorships,referenced_works",
+        }
+        if mailto:
+            params["mailto"] = mailto
+        try:
+            resp = requests.get("https://api.openalex.org/works", params=params, timeout=25)
+            if resp.ok:
+                for w in resp.json().get("results", []):
+                    wid = w.get("id", "")
+                    if wid:
+                        results[wid] = w
+        except Exception:
+            pass
+    return results
+
+
+def build_citation_genealogy(seed_works, generations=3, max_per_gen=20, mailto=""):
+    """
+    seed_works を第0世代として referenced_works を辿り最大 N 世代の系譜を構築。
+    Returns: (nodes, edges)
+      nodes : {id -> {label, title, gen, year}}
+      edges : [(source_id, target_id)]
+    """
+    all_nodes  = {}   # id -> dict
+    all_edges  = []   # [(src, tgt)]
+    work_cache = {}   # id -> work data
+
+    # ─ Gen 0 ─
+    for w in seed_works:
+        wid = w.get("id", "") or ""
+        if not wid:
+            continue
+        title = (w.get("title", "") or wid)
+        year  = str(w.get("publication_year") or "")
+        label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
+        all_nodes[wid]  = {"label": label, "title": title, "gen": 0, "year": year}
+        work_cache[wid] = w
+
+    current_layer = set(all_nodes.keys())
+
+    for gen in range(1, generations + 1):
+        if not current_layer:
+            break
+
+        # Collect referenced IDs from current layer (limit per paper)
+        next_ref_ids = set()
+        for wid in current_layer:
+            w = work_cache.get(wid, {})
+            refs = w.get("referenced_works", [])[:max_per_gen]
+            for ref in refs:
+                if ref:
+                    all_edges.append((wid, ref))
+                    if ref not in all_nodes:
+                        next_ref_ids.add(ref)
+
+        if not next_ref_ids:
+            break
+
+        # Fetch next generation details
+        fetched = fetch_referenced_works_batch(next_ref_ids, mailto)
+        work_cache.update(fetched)
+
+        next_layer = set()
+        for ref_id in next_ref_ids:
+            w = fetched.get(ref_id, {})
+            title = (w.get("title", "") or ref_id) if w else ref_id
+            year  = str(w.get("publication_year") or "") if w else ""
+            if w:
+                label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
+                next_layer.add(ref_id)
+            else:
+                m = re.search(r'W(\d+)', str(ref_id))
+                label = f"W{m.group(1)}" if m else ref_id
+            all_nodes[ref_id] = {"label": label, "title": title, "gen": gen, "year": year}
+
+        current_layer = next_layer
+
+    return all_nodes, all_edges
+
+
+def render_genealogy_pyvis(all_nodes, all_edges):
+    """引用系譜をPyVisで有向グラフとして描画。世代ごとに色分け。"""
+    try:
+        from pyvis.network import Network
+        import tempfile
+
+        GEN_COLORS = {0: "#4477CC", 1: "#44AA66", 2: "#CC9922", 3: "#CC4444"}
+
+        net = Network(
+            height="700px", width="100%",
+            bgcolor="#f9f9f9", font_color="#333333",
+            directed=True
+        )
+        net.barnes_hut(gravity=-5000, central_gravity=0.2, spring_length=150)
+
+        # Add nodes
+        node_ids_in_graph = set(all_nodes.keys())
+        for nid, info in all_nodes.items():
+            gen   = info.get("gen", 0)
+            color = GEN_COLORS.get(gen, "#aaaaaa")
+            size  = max(8, 28 - gen * 5)
+            label = info.get("label", nid)[:30]
+            title = (
+                f"<b>Gen {gen}</b><br>"
+                f"{info.get('title', '')[:80]}<br>"
+                f"Year: {info.get('year', '—')}"
+            )
+            net.add_node(str(nid), label=label, size=size, color=color, title=title)
+
+        # Add edges (only between nodes that exist in the graph)
+        seen_edges = set()
+        for src, tgt in all_edges:
+            if src in node_ids_in_graph and tgt in node_ids_in_graph:
+                key = (str(src), str(tgt))
+                if key not in seen_edges:
+                    seen_edges.add(key)
+                    net.add_edge(str(src), str(tgt), arrows="to", color="#aaaaaa", width=1)
+
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
+            net.save_graph(f.name)
+            html_content = open(f.name).read()
+
+        st.components.v1.html(html_content, height=720, scrolling=False)
+
+    except ImportError:
+        st.warning(tl(
+            "pyvis 未インストール。`pip install pyvis` を実行してください。",
+            "pyvis not installed. Run `pip install pyvis`."
+        ))
+
+
 def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     """BERTopicでトピッククラスタリング → ネットワーク化"""
     import html as _html
@@ -2261,6 +2415,7 @@ else:
             tl("BERTopic クラスタリング","BERTopic Clustering"),
             tl("K-means クラスタリング","K-means Clustering"),
             tl("引用分析","Citation Analysis"),
+            tl("🌳 引用系譜（3世代）","🌳 Citation Genealogy (3 Generations)"),
         ])
 
         # 手法説明
@@ -2340,13 +2495,28 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
 - Kessler, M. M. (1963). Bibliographic coupling between scientific papers. *American Documentation*, 14(1), 10–25. [DOI](https://doi.org/10.1002/asi.5090140103)
 - Small, H. (1973). Co-citation in the scientific literature. *JASIST*, 24(4), 265–269. [DOI](https://doi.org/10.1002/asi.4630240406)
 - Garfield, E. (1955). Citation indexes for science. *Science*, 122(3159), 108–111. [DOI](https://doi.org/10.1126/science.122.3159.108)"""),
+            tl("🌳 引用系譜（3世代）","🌳 Citation Genealogy (3 Generations)"): tl(
+                """選択した論文（第0世代）の参考文献リスト（第1世代）→ その参考文献（第2世代）→ さらにその参考文献（第3世代）を辿り、引用の系譜を有向グラフで可視化します。
+
+**世代ごとの色分け**
+🔵 第0世代（収集論文） 🟢 第1世代 🟡 第2世代 🔴 第3世代
+
+少数の重要論文・研究者グループの知識系譜把握に最適です。
+**注意**: OpenAlexデータが必要です（PubMed・Lens.orgでは利用不可）。論文数が多い場合は処理に時間がかかります。""",
+                """Traces backward citations from your selected papers (Gen 0) → their references (Gen 1) → those references' references (Gen 2) → and one level further (Gen 3), visualized as a directed graph.
+
+**Color by generation**
+🔵 Gen 0 (collected) 🟢 Gen 1 🟡 Gen 2 🔴 Gen 3
+
+Best suited for a small set of key papers to reveal the intellectual lineage of a research topic.
+**Note**: Requires OpenAlex data (not available for PubMed or Lens.org sources)."""),
         }
         if analysis_type in _method_info:
             with st.expander(tl("📖 この手法について","📖 About this method")):
                 st.markdown(_method_info[analysis_type])
 
         # 引用分析サブタイプ
-        if tl("引用分析","Citation Analysis") in analysis_type:
+        if tl("引用分析","Citation Analysis") in analysis_type and tl("引用系譜","Citation Genealogy") not in analysis_type:
             citation_type_label = st.radio(
                 tl("引用分析の種類","Citation analysis type"),
                 [tl("書誌結合 (Bibliographic Coupling)","Bibliographic Coupling"),
@@ -2357,6 +2527,29 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                              else "direct_citation")
         else:
             citation_type = "bibliographic_coupling"
+
+        # 引用系譜パラメータ
+        if tl("引用系譜","Citation Genealogy") in analysis_type:
+            st.markdown("---")
+            st.caption(tl(
+                "⚠️ OpenAlexデータ専用です。PubMed・Lens.orgでは参考文献データがないため使用できません。",
+                "⚠️ OpenAlex data only. PubMed and Lens.org do not provide reference lists."
+            ))
+            genealogy_generations = st.slider(
+                tl("追跡世代数","Generations to trace"), 1, 3, 3,
+                key="genealogy_gen",
+                help=tl("多いほど深く遡れますが、API呼び出し回数が増加します。",
+                        "More generations = deeper trace, but more API calls.")
+            )
+            genealogy_max_per_gen = st.slider(
+                tl("1論文あたり最大参考文献数","Max references per paper"), 5, 50, 20,
+                key="genealogy_max_per_gen",
+                help=tl("各論文から辿る参考文献の最大数。多いとグラフが巨大になります。",
+                        "Max references to follow per paper. Higher = larger graph.")
+            )
+        else:
+            genealogy_generations  = 3
+            genealogy_max_per_gen  = 20
 
         # モデル選択（BERT系手法のとき）
         keybert_types  = [tl("KeyBERT キーワード共起","KeyBERT Keyword Co-occurrence")]
@@ -2504,6 +2697,29 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                                 "Install BERTopic: `pip install bertopic`"))
                     st.stop()
 
+        elif tl("引用系譜","Citation Genealogy") in analysis_type:
+            _is_pubmed_src = any(w.get("_source") == "pubmed" for w in works)
+            if _is_pubmed_src:
+                st.error(tl(
+                    "⚠️ 引用系譜はOpenAlexデータ専用です。PubMedでは参考文献リストが取得できません。",
+                    "⚠️ Citation Genealogy requires OpenAlex data. PubMed does not provide reference lists."
+                ))
+                st.stop()
+            with st.spinner(tl(
+                f"引用系譜を構築中（最大{genealogy_generations}世代、各論文{genealogy_max_per_gen}件）...",
+                f"Building citation genealogy (up to {genealogy_generations} generations, {genealogy_max_per_gen} refs/paper)..."
+            )):
+                _g_nodes, _g_edges = build_citation_genealogy(
+                    works,
+                    generations=genealogy_generations,
+                    max_per_gen=genealogy_max_per_gen,
+                    mailto=_oa_email()
+                )
+            st.session_state["genealogy_nodes"] = _g_nodes
+            st.session_state["genealogy_edges"] = _g_edges
+            st.session_state["analysis_type"]   = analysis_type
+            vos_data = None  # genealogy uses its own rendering
+
         elif tl("引用分析","Citation Analysis") in analysis_type:
             _ct_label = tl("書誌結合","Bibliographic Coupling") if citation_type == "bibliographic_coupling" else tl("直接引用","Direct Citation")
             with st.spinner(tl(f"引用分析（{_ct_label}）構築中...", f"Building citation network ({_ct_label})...")):
@@ -2522,19 +2738,74 @@ Draws a direct edge when paper A cites paper B (both must be in the collected se
                     works, model_key, n_clusters, min_links)
                 vos_data = largest_connected_component(vos_data)
 
-        lcc_size = len(vos_data.get("items", []))
-        st.info(tl(f"最大連結成分: {lcc_size} ノードを表示（孤立クラスターを除外）",
-                   f"Largest connected component: {lcc_size} nodes (isolated clusters excluded)"))
+        if vos_data is not None:
+            lcc_size = len(vos_data.get("items", []))
+            st.info(tl(f"最大連結成分: {lcc_size} ノードを表示（孤立クラスターを除外）",
+                       f"Largest connected component: {lcc_size} nodes (isolated clusters excluded)"))
 
-        with st.spinner(tl("中心性を計算中...","Computing centrality...")):
-            centrality = compute_centrality(vos_data)
-        st.session_state["vos_data"] = vos_data
-        st.session_state["work_keywords"] = work_keywords
-        st.session_state["cluster_map"] = cluster_map
-        st.session_state["cluster_labels_map"] = cluster_labels_map
-        st.session_state["analysis_type"] = analysis_type
-        st.session_state["viz_method"] = viz_method
-        st.session_state["centrality"] = centrality
+            with st.spinner(tl("中心性を計算中...","Computing centrality...")):
+                centrality = compute_centrality(vos_data)
+            st.session_state["vos_data"] = vos_data
+            st.session_state["work_keywords"] = work_keywords
+            st.session_state["cluster_map"] = cluster_map
+            st.session_state["cluster_labels_map"] = cluster_labels_map
+            st.session_state["analysis_type"] = analysis_type
+            st.session_state["viz_method"] = viz_method
+            st.session_state["centrality"] = centrality
+
+    # ── 引用系譜グラフ ──
+    _g_nodes = st.session_state.get("genealogy_nodes")
+    _g_edges = st.session_state.get("genealogy_edges")
+    _g_ana   = st.session_state.get("analysis_type", "")
+    if _g_nodes and tl("引用系譜","Citation Genealogy") in _g_ana:
+        st.markdown("---")
+        st.subheader(tl("🌳 引用系譜グラフ（Citation Genealogy）",
+                        "🌳 Citation Genealogy Graph"))
+
+        # 世代ごとの凡例
+        _gen_legend = {
+            0: ("🔵", tl("第0世代（収集論文）","Gen 0 (collected papers)"), "#4477CC"),
+            1: ("🟢", tl("第1世代（直接参照）","Gen 1 (direct references)"), "#44AA66"),
+            2: ("🟡", tl("第2世代","Gen 2"), "#CC9922"),
+            3: ("🔴", tl("第3世代","Gen 3"), "#CC4444"),
+        }
+        _gen_counts = {}
+        for nd in _g_nodes.values():
+            g = nd.get("gen", 0)
+            _gen_counts[g] = _gen_counts.get(g, 0) + 1
+
+        _lcols = st.columns(len(_gen_counts))
+        for i, (g, cnt) in enumerate(sorted(_gen_counts.items())):
+            icon, label, _ = _gen_legend.get(g, ("⚪", f"Gen {g}", "#aaa"))
+            _lcols[i].metric(f"{icon} {label}", f"{cnt} {tl('論文','papers')}")
+
+        # エッジのうちグラフ内ノード間のみカウント
+        _valid_edges = [(s, t) for s, t in _g_edges
+                        if s in _g_nodes and t in _g_nodes]
+        st.caption(tl(
+            f"総ノード: {len(_g_nodes)}　有向エッジ: {len(_valid_edges)}　"
+            f"（矢印の向き: 元論文 → 引用されている論文）",
+            f"Total nodes: {len(_g_nodes)}　Directed edges: {len(_valid_edges)}　"
+            f"(Arrow direction: paper → its reference)"
+        ))
+
+        render_genealogy_pyvis(_g_nodes, _g_edges)
+
+        # テーブル表示
+        with st.expander(tl("📋 系譜ノード一覧","📋 Genealogy Node List")):
+            import pandas as pd
+            _g_rows = []
+            for nid, nd in _g_nodes.items():
+                g = nd.get("gen", 0)
+                icon = _gen_legend.get(g, ("⚪","",""))[0]
+                _g_rows.append({
+                    tl("世代","Gen"): f"{icon} Gen {g}",
+                    tl("タイトル","Title"): nd.get("title", "")[:80],
+                    tl("年","Year"): nd.get("year", ""),
+                    "OpenAlex ID": nid,
+                })
+            _g_rows.sort(key=lambda r: r[tl("世代","Gen")])
+            st.dataframe(pd.DataFrame(_g_rows), use_container_width=True, hide_index=True)
 
     # ── DOI引用ネットワーク（ページ上部に表示）──
     _cite_target = st.session_state.get("cite_target")
@@ -3015,27 +3286,19 @@ function openGephiLite() {{
                         st.session_state.pop(_k, None)
                     st.rerun()
 
-        # ── 重要論文ランキング（被引用数 / 出版年） ──
+        # ── 重要論文ランキング（被引用数順） ──
         st.markdown("---")
+        st.subheader(tl("📄 重要論文ランキング（被引用数順）",
+                        "📄 Key Papers Ranking (by citation count)"))
 
-        # 被引用数が全件0かどうか判定（PubMed等、被引用数未取得データの検出）
-        _all_cited = [w.get("cited_by_count", 0) or 0 for w in works]
-        _no_citation_data = all(c == 0 for c in _all_cited)
+        # PubMedデータ（被引用数なし）の場合はメッセージのみ表示して終了
         _is_pubmed_src = any(w.get("_source") == "pubmed" for w in works)
-
-        if _no_citation_data:
-            st.subheader(tl("📄 論文一覧（出版年順）",
-                            "📄 Papers List (by publication year)"))
+        if _is_pubmed_src:
             st.warning(tl(
-                "⚠️ このデータセットは被引用数を取得できません（PubMedデータ）。"
-                "被引用数はすべて0のため、ランキングは無意味です。代わりに**出版年（新しい順）**で表示します。",
-                "⚠️ Citation counts are unavailable for this dataset (PubMed data). "
-                "All values are 0, so ranking by citations is meaningless. "
-                "Showing papers sorted by **publication year (newest first)** instead."
+                "⚠️ PubMedは引用情報を提供していないため、重要論文ランキングは表示できません。",
+                "⚠️ PubMed does not provide citation counts, so the key papers ranking is unavailable."
             ))
         else:
-            st.subheader(tl("📄 重要論文ランキング（被引用数順）",
-                            "📄 Key Papers Ranking (by citation count)"))
             st.caption(tl(
                 "ネットワーク分析に依存せず、データセット内の論文を**被引用数**で直接ランキングします。"
                 "論文数が少ない場合でも信頼性の高い重要度指標です。",
@@ -3052,66 +3315,58 @@ function openGephiLite() {{
             ))
 
         import pandas as pd
-        _top_n_papers = st.slider(
-            tl("表示件数","Top N papers"), 5, 100, 20, key="top_papers_n"
-        )
-        _paper_rows = []
-        for w in works:
-            title  = w.get("title","") or "No title"
-            year   = w.get("publication_year","") or 0
-            cited  = w.get("cited_by_count", 0) or 0
-            doi    = w.get("doi","") or ""
-            auths  = [a.get("author",{}).get("display_name","")
-                      for a in w.get("authorships",[])[:3]]
-            topics = [t.get("display_name","") for t in w.get("topics",[])[:2]]
-            _paper_rows.append({
-                tl("被引用数","Cited"):   cited,
-                tl("タイトル","Title"):   title,
-                tl("著者","Authors"):     "; ".join(filter(None, auths)),
-                tl("年","Year"):          year,
-                tl("トピック","Topics"):  "; ".join(topics),
-                "DOI":                    doi,
-            })
+        if not _is_pubmed_src:
+            _top_n_papers = st.slider(
+                tl("表示件数","Top N papers"), 5, 100, 20, key="top_papers_n"
+            )
+            _paper_rows = []
+            for w in works:
+                title  = w.get("title","") or "No title"
+                year   = w.get("publication_year","") or 0
+                cited  = w.get("cited_by_count", 0) or 0
+                doi    = w.get("doi","") or ""
+                auths  = [a.get("author",{}).get("display_name","")
+                          for a in w.get("authorships",[])[:3]]
+                topics = [t.get("display_name","") for t in w.get("topics",[])[:2]]
+                _paper_rows.append({
+                    tl("被引用数","Cited"):   cited,
+                    tl("タイトル","Title"):   title,
+                    tl("著者","Authors"):     "; ".join(filter(None, auths)),
+                    tl("年","Year"):          year,
+                    tl("トピック","Topics"):  "; ".join(topics),
+                    "DOI":                    doi,
+                })
 
-        # 被引用数データなし → 出版年順、あり → 被引用数順
-        _sort_col = tl("年","Year") if _no_citation_data else tl("被引用数","Cited")
-        _papers_df = (
-            pd.DataFrame(_paper_rows)
-            .sort_values(_sort_col, ascending=False)
-            .reset_index(drop=True)
-        )
-        _papers_df.index = _papers_df.index + 1  # 1始まり
+            _papers_df = (
+                pd.DataFrame(_paper_rows)
+                .sort_values(tl("被引用数","Cited"), ascending=False)
+                .reset_index(drop=True)
+            )
+            _papers_df.index = _papers_df.index + 1  # 1始まり
+            _display_cols = None
 
-        # 被引用数が全0の場合は列を非表示
-        _display_cols = (
-            [tl("タイトル","Title"), tl("著者","Authors"), tl("年","Year"), tl("トピック","Topics")]
-            if _no_citation_data
-            else None
-        )
-
-        # 上位N件をテーブル表示
-        _show_df = _papers_df.head(_top_n_papers)
-        if _display_cols:
-            st.dataframe(_show_df[_display_cols], use_container_width=True)
-        else:
+        # 上位N件をテーブル表示（PubMedは非表示）
+        if not _is_pubmed_src:
+            _show_df = _papers_df.head(_top_n_papers)
             st.dataframe(_show_df.drop(columns=["DOI"]), use_container_width=True)
 
-        # 詳細エキスパンダー
-        for rank, row in _papers_df.head(_top_n_papers).iterrows():
-            _cited_label = tl(f"📊 被引用: {row[tl('被引用数','Cited')]}",
-                              f"📊 Cited: {row[tl('被引用数','Cited')]}")
-            with st.expander(
-                f"{rank}. {row[tl('タイトル','Title')][:70]}"
-                f"{'...' if len(row[tl('タイトル','Title')])>70 else ''}  "
-                f"({row[tl('年','Year')]})  {_cited_label}"
-            ):
-                st.markdown(f"**{row[tl('タイトル','Title')]}**")
-                if row[tl("著者","Authors")]:
-                    st.caption("✍️ " + row[tl("著者","Authors")])
-                if row[tl("トピック","Topics")]:
-                    st.caption("🏷️ " + row[tl("トピック","Topics")])
-                if row["DOI"]:
-                    st.markdown(f"[🔗 DOI]({row['DOI']})")
+        # 詳細エキスパンダー（PubMedは非表示）
+        if not _is_pubmed_src:
+            for rank, row in _papers_df.head(_top_n_papers).iterrows():
+                _cited_label = tl(f"📊 被引用: {row[tl('被引用数','Cited')]}",
+                                  f"📊 Cited: {row[tl('被引用数','Cited')]}")
+                with st.expander(
+                    f"{rank}. {row[tl('タイトル','Title')][:70]}"
+                    f"{'...' if len(row[tl('タイトル','Title')])>70 else ''}  "
+                    f"({row[tl('年','Year')]})  {_cited_label}"
+                ):
+                    st.markdown(f"**{row[tl('タイトル','Title')]}**")
+                    if row[tl("著者","Authors")]:
+                        st.caption("✍️ " + row[tl("著者","Authors")])
+                    if row[tl("トピック","Topics")]:
+                        st.caption("🏷️ " + row[tl("トピック","Topics")])
+                    if row["DOI"]:
+                        st.markdown(f"[🔗 DOI]({row['DOI']})")
                 # アブストラクト
                 _w = next((w for w in works if w.get("title","") == row[tl("タイトル","Title")]), None)
                 if _w:
