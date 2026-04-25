@@ -978,6 +978,79 @@ def render_genealogy_pyvis(all_nodes, all_edges):
         ))
 
 
+def fetch_citing_works(work_id, max_results=20, mailto=""):
+    """work_id を引用している論文を被引用数順で取得（OpenAlex cites フィルタ）"""
+    m = re.search(r'(W\d+)', str(work_id))
+    if not m:
+        return []
+    params = {
+        "filter":   f"cites:{m.group(1)}",
+        "sort":     "cited_by_count:desc",
+        "per-page": min(max_results, 50),
+        "select":   "id,title,publication_year,doi,cited_by_count,authorships,referenced_works",
+    }
+    if mailto:
+        params["mailto"] = mailto
+    try:
+        resp = requests.get("https://api.openalex.org/works", params=params, timeout=25)
+        if resp.ok:
+            return resp.json().get("results", [])
+    except Exception:
+        pass
+    return []
+
+
+def build_forward_citation_genealogy(seed_works, generations=3, max_per_gen=20, mailto=""):
+    """
+    seed_works を第0世代として、被引用論文（自分を引用している論文）を世代ごとに辿る。
+    Returns: (nodes, edges)
+      nodes : {id -> {label, title, gen, year}}
+      edges : [(citing_id, cited_id)]  ← 引用している論文 → 引用されている論文
+    """
+    all_nodes  = {}
+    all_edges  = []
+
+    # ─ Gen 0 ─
+    for w in seed_works:
+        wid = w.get("id", "") or ""
+        if not wid:
+            continue
+        title = (w.get("title", "") or wid)
+        year  = str(w.get("publication_year") or "")
+        label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
+        all_nodes[wid] = {"label": label, "title": title, "gen": 0, "year": year}
+
+    current_layer = set(all_nodes.keys())
+
+    for gen in range(1, generations + 1):
+        if not current_layer:
+            break
+
+        # 現世代の各論文を引用している論文を取得
+        # 層が大きくなるほど per_paper_limit を絞って爆発防止
+        per_paper = max(3, max_per_gen // max(1, len(current_layer)))
+
+        next_layer = set()
+        for wid in current_layer:
+            citing_list = fetch_citing_works(wid, per_paper, mailto)
+            for w in citing_list:
+                cid = w.get("id", "")
+                if not cid:
+                    continue
+                # エッジ: 引用している論文 → 引用されている論文
+                all_edges.append((cid, wid))
+                if cid not in all_nodes:
+                    title = (w.get("title", "") or cid)
+                    year  = str(w.get("publication_year") or "")
+                    label = (f"{title[:45]}… ({year})" if len(title) > 45 else f"{title} ({year})") if year else title[:50]
+                    all_nodes[cid] = {"label": label, "title": title, "gen": gen, "year": year}
+                    next_layer.add(cid)
+
+        current_layer = next_layer
+
+    return all_nodes, all_edges
+
+
 def build_bertopic_network(works, model_key, min_links=2, min_topic_size=10):
     """BERTopicでトピッククラスタリング → ネットワーク化"""
     import html as _html
@@ -2535,7 +2608,24 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                 "⚠️ OpenAlexデータ専用です。PubMed・Lens.orgでは参考文献データがないため使用できません。",
                 "⚠️ OpenAlex data only. PubMed and Lens.org do not provide reference lists."
             ))
-            # 論文1本選択
+
+            # ── 方向選択 ──
+            _dir_backward = tl("⬅ 引用系譜（過去を遡る）","⬅ Backward (traces references)")
+            _dir_forward  = tl("➡ 被引用系譜（将来を追う）","➡ Forward (traces citing papers)")
+            genealogy_direction_label = st.radio(
+                tl("系譜の方向","Genealogy direction"),
+                [_dir_backward, _dir_forward],
+                key="genealogy_direction",
+                help=tl(
+                    "⬅ 引用系譜: この論文が引用している論文を遡る（知識の源流）\n"
+                    "➡ 被引用系譜: この論文を引用している論文を追う（知識の波及）",
+                    "⬅ Backward: traces papers this work references (intellectual origins)\n"
+                    "➡ Forward: traces papers that cite this work (influence spread)"
+                )
+            )
+            genealogy_direction = "forward" if _dir_forward in genealogy_direction_label else "backward"
+
+            # ── 論文1本選択 ──
             if works:
                 def _paper_label(w):
                     _t = (w.get("title", "") or w.get("id", ""))[:55]
@@ -2556,8 +2646,8 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                     index=list(_paper_options.keys()).index(_default_id),
                     key="genealogy_seed_selectbox",
                     help=tl(
-                        "この論文を起点として、過去の引用を世代ごとに遡ります。",
-                        "Traces backward citations from this paper, generation by generation."
+                        "この論文を起点として系譜を辿ります。",
+                        "Traces the citation genealogy from this paper."
                     )
                 )
                 st.session_state["genealogy_seed_id"] = genealogy_seed_id
@@ -2567,19 +2657,25 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
             genealogy_generations = st.slider(
                 tl("追跡世代数","Generations to trace"), 1, 3, 3,
                 key="genealogy_gen",
-                help=tl("多いほど深く遡れますが、API呼び出し回数が増加します。",
+                help=tl("多いほど深く辿れますが、API呼び出し回数が増加します。",
                         "More generations = deeper trace, but more API calls.")
             )
+            _ref_label = (
+                tl("1論文あたり最大被引用論文数","Max citing papers per paper")
+                if genealogy_direction == "forward"
+                else tl("1論文あたり最大参考文献数","Max references per paper")
+            )
             genealogy_max_per_gen = st.slider(
-                tl("1論文あたり最大参考文献数","Max references per paper"), 5, 50, 20,
+                _ref_label, 5, 50, 20,
                 key="genealogy_max_per_gen",
-                help=tl("各論文から辿る参考文献の最大数。多いとグラフが巨大になります。",
-                        "Max references to follow per paper. Higher = larger graph.")
+                help=tl("各論文から辿る最大数。多いとグラフが巨大になります。",
+                        "Max papers to follow per paper. Higher = larger graph.")
             )
         else:
             genealogy_generations  = 3
             genealogy_max_per_gen  = 20
             genealogy_seed_id      = None
+            genealogy_direction    = "backward"
 
         # モデル選択（BERT系手法のとき）
         keybert_types  = [tl("KeyBERT キーワード共起","KeyBERT Keyword Co-occurrence")]
@@ -2753,19 +2849,34 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                 ))
                 st.stop()
             _seed_title = (_seed_works[0].get("title","") or _seed_id)[:60]
+
+            if genealogy_direction == "forward":
+                _dir_ja, _dir_en = "被引用系譜", "forward citation genealogy"
+            else:
+                _dir_ja, _dir_en = "引用系譜", "backward citation genealogy"
+
             with st.spinner(tl(
-                f"引用系譜を構築中…「{_seed_title}」（最大{genealogy_generations}世代、各{genealogy_max_per_gen}件）",
-                f"Building genealogy for '{_seed_title}' (up to {genealogy_generations} gen, {genealogy_max_per_gen} refs/paper)..."
+                f"{_dir_ja}を構築中…「{_seed_title}」（最大{genealogy_generations}世代、各{genealogy_max_per_gen}件）",
+                f"Building {_dir_en} for '{_seed_title}' (up to {genealogy_generations} gen, {genealogy_max_per_gen}/paper)..."
             )):
-                _g_nodes, _g_edges = build_citation_genealogy(
-                    _seed_works,
-                    generations=genealogy_generations,
-                    max_per_gen=genealogy_max_per_gen,
-                    mailto=_oa_email()
-                )
+                if genealogy_direction == "forward":
+                    _g_nodes, _g_edges = build_forward_citation_genealogy(
+                        _seed_works,
+                        generations=genealogy_generations,
+                        max_per_gen=genealogy_max_per_gen,
+                        mailto=_oa_email()
+                    )
+                else:
+                    _g_nodes, _g_edges = build_citation_genealogy(
+                        _seed_works,
+                        generations=genealogy_generations,
+                        max_per_gen=genealogy_max_per_gen,
+                        mailto=_oa_email()
+                    )
             st.session_state["genealogy_nodes"]      = _g_nodes
             st.session_state["genealogy_edges"]      = _g_edges
             st.session_state["genealogy_seed_title"] = _seed_title
+            st.session_state["genealogy_direction"]  = genealogy_direction
             st.session_state["analysis_type"]        = analysis_type
             vos_data = None  # genealogy uses its own rendering
 
@@ -2808,20 +2919,43 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
     _g_ana   = st.session_state.get("analysis_type", "")
     if _g_nodes and tl("引用系譜","Citation Genealogy") in _g_ana:
         st.markdown("---")
-        st.subheader(tl("🌳 引用系譜グラフ（Citation Genealogy）",
-                        "🌳 Citation Genealogy Graph"))
-        _g_seed_title = st.session_state.get("genealogy_seed_title", "")
+        _g_direction   = st.session_state.get("genealogy_direction", "backward")
+        _g_seed_title  = st.session_state.get("genealogy_seed_title", "")
+
+        if _g_direction == "forward":
+            st.subheader(tl("🌳 被引用系譜グラフ（Forward Citation Genealogy）",
+                            "🌳 Forward Citation Genealogy Graph"))
+            st.caption(tl(
+                "矢印の向き: 引用している論文 → 引用されている論文（起点論文が中心、外側ほど新しい）",
+                "Arrow direction: citing paper → cited paper (seed at center, outer nodes are newer)"
+            ))
+        else:
+            st.subheader(tl("🌳 引用系譜グラフ（Backward Citation Genealogy）",
+                            "🌳 Backward Citation Genealogy Graph"))
+            st.caption(tl(
+                "矢印の向き: 元論文 → 引用されている論文（起点論文が中心、外側ほど古い）",
+                "Arrow direction: paper → its reference (seed at center, outer nodes are older)"
+            ))
+
         if _g_seed_title:
             st.caption(tl(f"🔵 起点論文: **{_g_seed_title}**",
                           f"🔵 Seed paper: **{_g_seed_title}**"))
 
-        # 世代ごとの凡例
-        _gen_legend = {
-            0: ("🔵", tl("第0世代（収集論文）","Gen 0 (collected papers)"), "#4477CC"),
-            1: ("🟢", tl("第1世代（直接参照）","Gen 1 (direct references)"), "#44AA66"),
-            2: ("🟡", tl("第2世代","Gen 2"), "#CC9922"),
-            3: ("🔴", tl("第3世代","Gen 3"), "#CC4444"),
-        }
+        # 世代ごとの凡例（方向に応じてラベルを変える）
+        if _g_direction == "forward":
+            _gen_legend = {
+                0: ("🔵", tl("第0世代（起点論文）","Gen 0 (seed paper)"),           "#4477CC"),
+                1: ("🟢", tl("第1世代（直接引用した論文）","Gen 1 (direct citers)"), "#44AA66"),
+                2: ("🟡", tl("第2世代","Gen 2"),                                     "#CC9922"),
+                3: ("🔴", tl("第3世代","Gen 3"),                                     "#CC4444"),
+            }
+        else:
+            _gen_legend = {
+                0: ("🔵", tl("第0世代（起点論文）","Gen 0 (seed paper)"),          "#4477CC"),
+                1: ("🟢", tl("第1世代（直接参照）","Gen 1 (direct references)"),   "#44AA66"),
+                2: ("🟡", tl("第2世代","Gen 2"),                                    "#CC9922"),
+                3: ("🔴", tl("第3世代","Gen 3"),                                    "#CC4444"),
+            }
         _gen_counts = {}
         for nd in _g_nodes.values():
             g = nd.get("gen", 0)
