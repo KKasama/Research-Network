@@ -2535,6 +2535,30 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                 "⚠️ OpenAlexデータ専用です。PubMed・Lens.orgでは参考文献データがないため使用できません。",
                 "⚠️ OpenAlex data only. PubMed and Lens.org do not provide reference lists."
             ))
+            # 論文1本選択
+            if works:
+                _paper_options = {
+                    w.get("id", ""): f"{(w.get('title','') or w.get('id',''))[:60]}  ({w.get('publication_year','')})"
+                    for w in works if w.get("id")
+                }
+                _default_id = st.session_state.get("genealogy_seed_id", list(_paper_options.keys())[0])
+                if _default_id not in _paper_options:
+                    _default_id = list(_paper_options.keys())[0]
+                genealogy_seed_id = st.selectbox(
+                    tl("📄 起点論文を選択（1本）","📄 Select seed paper (1 paper)"),
+                    options=list(_paper_options.keys()),
+                    format_func=lambda k: _paper_options[k],
+                    index=list(_paper_options.keys()).index(_default_id),
+                    key="genealogy_seed_selectbox",
+                    help=tl(
+                        "この論文を起点として、過去の引用を世代ごとに遡ります。",
+                        "Traces backward citations from this paper, generation by generation."
+                    )
+                )
+                st.session_state["genealogy_seed_id"] = genealogy_seed_id
+            else:
+                genealogy_seed_id = None
+
             genealogy_generations = st.slider(
                 tl("追跡世代数","Generations to trace"), 1, 3, 3,
                 key="genealogy_gen",
@@ -2550,6 +2574,7 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
         else:
             genealogy_generations  = 3
             genealogy_max_per_gen  = 20
+            genealogy_seed_id      = None
 
         # モデル選択（BERT系手法のとき）
         keybert_types  = [tl("KeyBERT キーワード共起","KeyBERT Keyword Co-occurrence")]
@@ -2620,11 +2645,19 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
         # 可視化方法
         st.markdown("---")
         st.subheader(tl("📊 可視化方法","📊 Visualization"))
-        viz_method = st.radio(tl("表示方法","Display method"), [
-            tl("アプリ内（インタラクティブ）","In-app (Interactive)"),
-            "VOSviewer JSON",
-            "Retina / Gephi (GEXF)",
-        ])
+        _is_genealogy = tl("引用系譜","Citation Genealogy") in analysis_type
+        if _is_genealogy:
+            viz_method = tl("アプリ内（インタラクティブ）","In-app (Interactive)")
+            st.info(tl(
+                "🌳 引用系譜はアプリ内表示のみ対応しています。",
+                "🌳 Citation Genealogy supports in-app display only."
+            ))
+        else:
+            viz_method = st.radio(tl("表示方法","Display method"), [
+                tl("アプリ内（インタラクティブ）","In-app (Interactive)"),
+                "VOSviewer JSON",
+                "Retina / Gephi (GEXF)",
+            ])
 
         run_btn = st.button(tl("▶ 解析実行","▶ Run Analysis"),
                             type="primary", use_container_width=True)
@@ -2705,19 +2738,30 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                     "⚠️ Citation Genealogy requires OpenAlex data. PubMed does not provide reference lists."
                 ))
                 st.stop()
+            # 選択した1本のみを起点にする
+            _seed_id = genealogy_seed_id or (works[0].get("id","") if works else "")
+            _seed_works = [w for w in works if w.get("id","") == _seed_id]
+            if not _seed_works:
+                st.error(tl(
+                    "起点論文が見つかりませんでした。論文を選択し直してください。",
+                    "Seed paper not found. Please re-select a paper."
+                ))
+                st.stop()
+            _seed_title = (_seed_works[0].get("title","") or _seed_id)[:60]
             with st.spinner(tl(
-                f"引用系譜を構築中（最大{genealogy_generations}世代、各論文{genealogy_max_per_gen}件）...",
-                f"Building citation genealogy (up to {genealogy_generations} generations, {genealogy_max_per_gen} refs/paper)..."
+                f"引用系譜を構築中…「{_seed_title}」（最大{genealogy_generations}世代、各{genealogy_max_per_gen}件）",
+                f"Building genealogy for '{_seed_title}' (up to {genealogy_generations} gen, {genealogy_max_per_gen} refs/paper)..."
             )):
                 _g_nodes, _g_edges = build_citation_genealogy(
-                    works,
+                    _seed_works,
                     generations=genealogy_generations,
                     max_per_gen=genealogy_max_per_gen,
                     mailto=_oa_email()
                 )
-            st.session_state["genealogy_nodes"] = _g_nodes
-            st.session_state["genealogy_edges"] = _g_edges
-            st.session_state["analysis_type"]   = analysis_type
+            st.session_state["genealogy_nodes"]      = _g_nodes
+            st.session_state["genealogy_edges"]      = _g_edges
+            st.session_state["genealogy_seed_title"] = _seed_title
+            st.session_state["analysis_type"]        = analysis_type
             vos_data = None  # genealogy uses its own rendering
 
         elif tl("引用分析","Citation Analysis") in analysis_type:
@@ -2761,6 +2805,10 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
         st.markdown("---")
         st.subheader(tl("🌳 引用系譜グラフ（Citation Genealogy）",
                         "🌳 Citation Genealogy Graph"))
+        _g_seed_title = st.session_state.get("genealogy_seed_title", "")
+        if _g_seed_title:
+            st.caption(tl(f"🔵 起点論文: **{_g_seed_title}**",
+                          f"🔵 Seed paper: **{_g_seed_title}**"))
 
         # 世代ごとの凡例
         _gen_legend = {
