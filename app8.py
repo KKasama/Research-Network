@@ -63,10 +63,7 @@ KEYBERT_MODELS = {
         "allenai/scibert_scivocab_uncased",
         tl("📚 学術論文全般（推奨）", "📚 General academic papers (recommended)"),
     ),
-    "BioBERT": (
-        "dmis-lab/biobert-base-cased-v1.2",
-        tl("🧬 生命科学・医療・心理・福祉系", "🧬 Life science / medicine / psychology"),
-    ),
+
     "MiniLM (English)": (
         "all-MiniLM-L6-v2",
         tl("🌐 英語・一般（汎用・高速）", "🌐 English, general (fast)"),
