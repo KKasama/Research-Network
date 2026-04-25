@@ -1985,44 +1985,84 @@ if tl("① データ収集・保存","① Collect & Save") in step:
         col_browse, col_selected = st.columns([3, 1])
 
         with col_browse:
-            # 階層フィルタ
-            b_col1, b_col2, b_col3 = st.columns(3)
-            domains = [all_label] + sorted(set(t_["domain"]["display_name"] for t_ in topics_all if t_.get("domain")))
-            sel_domain = b_col1.selectbox("Domain", domains, key="s1_domain")
-            filtered = topics_all
-            if sel_domain != all_label:
-                filtered = [t_ for t_ in filtered if t_.get("domain",{}).get("display_name") == sel_domain]
-
-            fields = [all_label] + sorted(set(t_["field"]["display_name"] for t_ in filtered if t_.get("field")))
-            sel_field = b_col2.selectbox("Field", fields, key="s1_field")
-            if sel_field != all_label:
-                filtered = [t_ for t_ in filtered if t_.get("field",{}).get("display_name") == sel_field]
-
-            subfields = [all_label] + sorted(set(t_["subfield"]["display_name"] for t_ in filtered if t_.get("subfield")))
-            sel_sub = b_col3.selectbox("Subfield", subfields, key="s1_sub")
-            if sel_sub != all_label:
-                filtered = [t_ for t_ in filtered if t_.get("subfield",{}).get("display_name") == sel_sub]
-
-            topic_filter_kw = st.text_input(
-                tl("トピック名で絞り込み","Filter topics by name"),
-                key="s1_tf", placeholder=tl("例: battery, diabetes","e.g. battery, diabetes")
+            # ── Step 1: Domain（4つをラジオで表示）──
+            domains_list = sorted(set(
+                t_["domain"]["display_name"] for t_ in topics_all if t_.get("domain")
+            ))
+            sel_domain = st.radio(
+                tl("Step 1｜ドメインを選択","Step 1｜Select Domain"),
+                domains_list,
+                horizontal=True,
+                key="s1_domain",
             )
-            if topic_filter_kw:
-                filtered = [t_ for t_ in filtered if topic_filter_kw.lower() in t_["display_name"].lower()]
+            by_domain = [t_ for t_ in topics_all
+                         if t_.get("domain", {}).get("display_name") == sel_domain]
 
-            st.caption(f"**{len(filtered)}** " + tl("件のトピック（チェックで選択）","topics — check to select"))
+            st.markdown("---")
 
-            # チェックボックス一覧
-            for t_ in filtered[:100]:
-                tid   = t_["id"].replace("https://openalex.org/T","")
-                label = t_["display_name"]
-                checked = label in st.session_state.s1_selected_topics
-                if st.checkbox(label, value=checked, key="s1_cb_"+tid):
-                    if label not in st.session_state.s1_selected_topics:
-                        st.session_state.s1_selected_topics.append(label)
-                else:
-                    if label in st.session_state.s1_selected_topics:
-                        st.session_state.s1_selected_topics.remove(label)
+            # ── Step 2: Field ──
+            fields_list = sorted(set(
+                t_["field"]["display_name"] for t_ in by_domain if t_.get("field")
+            ))
+            sel_field = st.selectbox(
+                tl("Step 2｜フィールドを選択","Step 2｜Select Field"),
+                [all_label] + fields_list,
+                key="s1_field",
+            )
+            by_field = ([t_ for t_ in by_domain
+                         if t_.get("field", {}).get("display_name") == sel_field]
+                        if sel_field != all_label else by_domain)
+
+            # ── Step 3: Subfield（Field選択後のみ表示）──
+            if sel_field != all_label:
+                subfields_list = sorted(set(
+                    t_["subfield"]["display_name"] for t_ in by_field if t_.get("subfield")
+                ))
+                sel_sub = st.selectbox(
+                    tl("Step 3｜サブフィールドを選択","Step 3｜Select Subfield"),
+                    [all_label] + subfields_list,
+                    key="s1_sub",
+                )
+                by_sub = ([t_ for t_ in by_field
+                           if t_.get("subfield", {}).get("display_name") == sel_sub]
+                          if sel_sub != all_label else [])
+            else:
+                sel_sub = all_label
+                by_sub  = []
+
+            # ── Step 4: Topics（Subfield選択後のみ表示）──
+            if sel_sub != all_label and by_sub:
+                st.markdown("---")
+                topic_filter_kw = st.text_input(
+                    tl("トピック名で絞り込み（任意）","Filter topics by name (optional)"),
+                    key="s1_tf",
+                    placeholder=tl("例: cancer, battery","e.g. cancer, battery"),
+                )
+                filtered = ([t_ for t_ in by_sub
+                             if topic_filter_kw.lower() in t_["display_name"].lower()]
+                            if topic_filter_kw else by_sub)
+
+                st.caption(f"**{len(filtered)}** " + tl("件のトピック（チェックで選択）","topics — check to select"))
+                for t_ in filtered[:150]:
+                    tid   = t_["id"].replace("https://openalex.org/T", "")
+                    label = t_["display_name"]
+                    checked = label in st.session_state.s1_selected_topics
+                    if st.checkbox(label, value=checked, key="s1_cb_" + tid):
+                        if label not in st.session_state.s1_selected_topics:
+                            st.session_state.s1_selected_topics.append(label)
+                    else:
+                        if label in st.session_state.s1_selected_topics:
+                            st.session_state.s1_selected_topics.remove(label)
+            elif sel_field == all_label:
+                st.info(tl(
+                    "⬆ Step 2 でフィールドを選択してください",
+                    "⬆ Select a Field in Step 2 to continue"
+                ))
+            else:
+                st.info(tl(
+                    "⬆ Step 3 でサブフィールドを選択するとトピックが表示されます",
+                    "⬆ Select a Subfield in Step 3 to view Topics"
+                ))
 
         with col_selected:
             st.markdown(tl("**✅ 選択済みトピック**","**✅ Selected Topics**"))
