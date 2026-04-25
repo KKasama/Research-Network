@@ -2957,14 +2957,16 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                     f"Extracting keywords... {len(_texts)} papers [{model_name}]"
                 )):
                     kw_model = KeyBERT(model=model_key)
-                    # sentence-transformers 3.x でバッチ処理が
-                    # "Modality 'audio'" エラーを起こす場合があるため
-                    # バッチ → 失敗したら1件ずつにフォールバック
+                    _first_err = None
+
+                    # ① バッチ処理を試みる
                     try:
                         _all_kws = kw_model.extract_keywords(
                             _texts, keyphrase_ngram_range=(1, 2), top_n=5
                         )
-                    except (ValueError, TypeError):
+                    except Exception as _e:
+                        _first_err = _e
+                        # ② 失敗したら1件ずつ処理
                         _all_kws = []
                         _prog = st.progress(0)
                         for _i, _t in enumerate(_texts):
@@ -2972,7 +2974,9 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                                 _kw = kw_model.extract_keywords(
                                     _t, keyphrase_ngram_range=(1, 2), top_n=5
                                 )
-                            except Exception:
+                            except Exception as _e2:
+                                if _first_err is None:
+                                    _first_err = _e2
                                 _kw = []
                             _all_kws.append(_kw)
                             _prog.progress((_i + 1) / len(_texts))
@@ -2981,10 +2985,27 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                 work_keywords = {wid: [k for k, _ in kws]
                                  for wid, kws in zip(_wids, _all_kws)}
                 st.session_state[_kw_cache_key] = work_keywords
+
+            _total_kws = sum(len(v) for v in work_keywords.values())
+            if _total_kws == 0:
+                st.error(tl(
+                    f"⚠️ キーワードが1語も抽出できませんでした（モデル: {model_name}）。\n\n"
+                    f"**原因**: {_first_err}\n\n"
+                    "**対処法**: このモデルは sentence-transformers との互換性に問題がある可能性があります。"
+                    "サイドバーで **SciBERT** または **MiniLM (English)** に切り替えてください。",
+                    f"⚠️ No keywords extracted (model: {model_name}).\n\n"
+                    f"**Cause**: {_first_err}\n\n"
+                    "**Fix**: This model may be incompatible with your sentence-transformers version. "
+                    "Please switch to **SciBERT** or **MiniLM (English)** in the sidebar."
+                ))
+                st.stop()
+            else:
+                st.success(tl(
+                    f"キーワード抽出完了: {_total_kws}語 [{model_name}]",
+                    f"Keywords extracted: {_total_kws} [{model_name}]"
+                ))
             with st.spinner(tl("ネットワーク構築中...","Building network...")):
                 vos_data = largest_connected_component(build_keyword_cooccurrence(works, work_keywords, min_links))
-            st.success(tl(f"キーワード抽出完了: {sum(len(v) for v in work_keywords.values())}語 [{model_name}]",
-                          f"Keywords extracted: {sum(len(v) for v in work_keywords.values())} [{model_name}]"))
 
         elif tl("BERTopic","BERTopic") in analysis_type:
             with st.spinner(tl("BERTopicでクラスタリング中...","Running BERTopic clustering...")):
