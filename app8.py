@@ -3841,14 +3841,15 @@ function openGephiLite() {{
                             else:
                                 st.info(tl("引用論文が見つかりませんでした。","No citing papers found."))
 
-        # CSVダウンロード
-        _csv_papers = _papers_df.to_csv(index=True).encode("utf-8-sig")
-        st.download_button(
-            tl("📥 CSVダウンロード（全件）","📥 Download CSV (all papers)"),
-            data=_csv_papers,
-            file_name="key_papers.csv",
-            mime="text/csv"
-        )
+        # CSVダウンロード（PubMedは被引用数なしのため非表示）
+        if not _is_pubmed_src:
+            _csv_papers = _papers_df.to_csv(index=True).encode("utf-8-sig")
+            st.download_button(
+                tl("📥 CSVダウンロード（全件）","📥 Download CSV (all papers)"),
+                data=_csv_papers,
+                file_name="key_papers.csv",
+                mime="text/csv"
+            )
 
         # ── 上位ノード & 論文逆引き ──
         st.markdown("---")
