@@ -711,6 +711,47 @@ def compute_centrality(vos_data):
     return result
 
 # ────────────────────────────────────────────
+# sentence-transformers 直接利用によるキーワード抽出
+# ────────────────────────────────────────────────────
+def extract_keywords_with_st(texts, wids, model_name, top_n=5):
+    """
+    KeyBERT を使わず SentenceTransformer を直接呼び出すキーワード抽出。
+    sentence-transformers 3.x の Modality 検出エラーを回避。
+    アルゴリズム: CountVectorizer で n-gram 候補生成 → ST 埋め込み →
+                  文書ベクトルとのコサイン類似度で上位 top_n を選択。
+    """
+    from sentence_transformers import SentenceTransformer
+    from sklearn.feature_extraction.text import CountVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as np
+
+    # n-gram 候補語を抽出（全文書から最大300語）
+    try:
+        count = CountVectorizer(
+            ngram_range=(1, 2), stop_words="english", max_features=300
+        ).fit(texts)
+        candidates = count.get_feature_names_out().tolist()
+    except Exception:
+        candidates = []
+
+    if not candidates:
+        return {wid: [] for wid in wids}
+
+    model = SentenceTransformer(model_name)
+
+    # 文書と候補語を一括エンコード（KeyBERT の内部と同じ処理）
+    doc_embeddings  = model.encode(texts,      show_progress_bar=False, batch_size=32)
+    cand_embeddings = model.encode(candidates, show_progress_bar=False, batch_size=256)
+
+    result = {}
+    for wid, doc_emb in zip(wids, doc_embeddings):
+        sims    = cosine_similarity([doc_emb], cand_embeddings)[0]
+        top_idx = np.argsort(sims)[::-1][:top_n]
+        result[wid] = [candidates[j] for j in top_idx]
+
+    return result
+
+
 # TF-IDF キーワード抽出（BERT フォールバック）
 # ────────────────────────────────────────────
 def extract_keywords_tfidf(texts, wids, top_n=5):
@@ -2947,7 +2988,6 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                 vos_data = largest_connected_component(build_coauth(works, min_links))
 
         elif tl("KeyBERT","KeyBERT") in analysis_type:
-            from keybert import KeyBERT
             import html as _html
 
             _kw_cache_key = f"kw_{selected_ds}_{model_key}_{keybert_max_papers}"
@@ -2974,37 +3014,19 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
                         _texts.append(text)
 
                 with st.spinner(tl(
-                    f"KeyBERT でキーワード抽出中... {len(_texts)}件 [{model_name}]",
+                    f"キーワード抽出中... {len(_texts)}件 [{model_name}]",
                     f"Extracting keywords... {len(_texts)} papers [{model_name}]"
                 )):
-                    kw_model = KeyBERT(model=model_key)
-                    _first_err = None
-
-                    # ① バッチ処理を試みる
+                    _st_err = None
                     try:
-                        _all_kws = kw_model.extract_keywords(
-                            _texts, keyphrase_ngram_range=(1, 2), top_n=5
+                        # sentence-transformers 直接呼び出し（KeyBERT 不使用）
+                        work_keywords = extract_keywords_with_st(
+                            _texts, _wids, model_key, top_n=5
                         )
-                    except Exception as _e:
-                        _first_err = _e
-                        # ② 失敗したら1件ずつ処理
-                        _all_kws = []
-                        _prog = st.progress(0)
-                        for _i, _t in enumerate(_texts):
-                            try:
-                                _kw = kw_model.extract_keywords(
-                                    _t, keyphrase_ngram_range=(1, 2), top_n=5
-                                )
-                            except Exception as _e2:
-                                if _first_err is None:
-                                    _first_err = _e2
-                                _kw = []
-                            _all_kws.append(_kw)
-                            _prog.progress((_i + 1) / len(_texts))
-                        _prog.empty()
+                    except Exception as _st_err_caught:
+                        _st_err = _st_err_caught
+                        work_keywords = {wid: [] for wid in _wids}
 
-                work_keywords = {wid: [k for k, _ in kws]
-                                 for wid, kws in zip(_wids, _all_kws)}
                 st.session_state[_kw_cache_key] = work_keywords
 
             _total_kws = sum(len(v) for v in work_keywords.values())
