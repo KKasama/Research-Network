@@ -387,9 +387,8 @@ class OpenAlexResolver:
 # ──────────────────────────────────────────────────────────────────────────
 # DuckDB schema and writer
 # ──────────────────────────────────────────────────────────────────────────
-SCHEMA_PAPERS = """
-CREATE TABLE papers (
-    lens_id                  VARCHAR PRIMARY KEY,
+_PAPERS_COLS = """
+    lens_id                  VARCHAR,
     title                    VARCHAR,
     year                     INTEGER,
     publication_type         VARCHAR,
@@ -403,14 +402,29 @@ CREATE TABLE papers (
     ror_ids                  VARCHAR,
     patent_citation_count    INTEGER,
     scholarly_citation_count INTEGER
+"""
+
+# Staging tables: NO primary keys / unique constraints. The per-row PK
+# lookup overhead is what was OOMing DuckDB at hundreds-of-thousands of
+# row inserts (12.7 GiB used). We bulk-insert into staging without any
+# constraint, then dedupe via SELECT DISTINCT / QUALIFY into the final
+# tables, which is dramatically cheaper.
+SCHEMA_PAPERS_STG = f"CREATE TABLE papers_stg ({_PAPERS_COLS})"
+
+SCHEMA_LINKS_STG = """
+CREATE TABLE paper_patent_links_stg (
+    paper_lens_id  VARCHAR,
+    patent_lens_id VARCHAR
 )
 """
+
+# Final tables (created after dedupe).
+SCHEMA_PAPERS = f"CREATE TABLE papers ({_PAPERS_COLS})"
 
 SCHEMA_LINKS = """
 CREATE TABLE paper_patent_links (
     paper_lens_id  VARCHAR,
-    patent_lens_id VARCHAR,
-    PRIMARY KEY (paper_lens_id, patent_lens_id)
+    patent_lens_id VARCHAR
 )
 """
 
@@ -449,16 +463,23 @@ def build_db(
         output_path.unlink()
 
     con = duckdb.connect(str(output_path))
-    # Lower memory overhead for the bulk-insert workload. DuckDB holds row
-    # ordering metadata for each row in an active transaction; for our
-    # workload (millions of small rows) this can balloon to many GB and
-    # OOM the process. We don't care about insertion order, so disable it.
-    try:
-        con.execute("SET preserve_insertion_order = false")
-    except Exception:
-        pass
-    con.execute(SCHEMA_PAPERS)
-    con.execute(SCHEMA_LINKS)
+    # Memory limit + insertion-order off: at hundreds-of-thousands of rows,
+    # DuckDB's default 80%-of-RAM budget can be exhausted. Cap memory and
+    # let it spill to /tmp instead of OOMing.
+    for stmt in (
+        "SET memory_limit = '4GB'",
+        "SET preserve_insertion_order = false",
+    ):
+        try:
+            con.execute(stmt)
+        except Exception:
+            pass
+    # Phase 1 writes into staging tables (no primary keys); after Phase 1
+    # we materialise the final tables via DISTINCT / QUALIFY (set-based
+    # operations are dramatically more memory-efficient than per-row PK
+    # checks at this scale).
+    con.execute(SCHEMA_PAPERS_STG)
+    con.execute(SCHEMA_LINKS_STG)
     con.execute(SCHEMA_META)
 
     n_papers = 0
@@ -466,64 +487,90 @@ def build_db(
     n_oa_resolved = 0
 
     try:
-        # ────────────── Phase 1: stream Lens → DB ──────────────
-        LOG.info("Phase 1/3: streaming Lens results into DuckDB...")
-        # IMPORTANT: use INSERT OR IGNORE rather than try/except. DuckDB's
-        # MVCC transactions enter an aborted state on a constraint violation
-        # within an active transaction; subsequent statements then fail with
-        # 'TransactionContext Error: Current transaction is aborted'. INSERT
-        # OR IGNORE silently skips the duplicate row without raising, which
-        # keeps the transaction healthy.
-        #
-        # ALSO: commit periodically. A single open transaction across millions
-        # of inserts retains undo information in memory and can OOM
-        # (we observed ~12.7 GiB RAM usage on a 350K-paper run before this
-        # fix). Periodic COMMIT releases that memory.
-        COMMIT_EVERY = 5000  # papers per transaction window
-        con.execute("BEGIN")
+        # ────────────── Phase 1: stream Lens → staging ──────────────
+        LOG.info("Phase 1/3: streaming Lens results into staging tables...")
+        # Bulk-insert via executemany() with a Python-side accumulator. This
+        # is 50-100x faster than per-row execute() and avoids the OOM seen
+        # at hundreds-of-thousands of inserts.
+        BATCH_SIZE = 2000
+        papers_buf: list[list] = []
+        links_buf: list[list] = []
         n_seen = 0
         last_log = 0
+
+        def _flush():
+            nonlocal papers_buf, links_buf
+            if papers_buf:
+                con.executemany(
+                    "INSERT INTO papers_stg VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    papers_buf,
+                )
+                papers_buf = []
+            if links_buf:
+                con.executemany(
+                    "INSERT INTO paper_patent_links_stg VALUES (?,?)",
+                    links_buf,
+                )
+                links_buf = []
+
         for raw in paper_iter:
             paper = normalise_paper(raw)
             if not paper["lens_id"]:
                 continue
 
-            con.execute(
-                "INSERT OR IGNORE INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [
-                    paper["lens_id"], paper["title"], paper["year"],
-                    paper["publication_type"], paper["doi"], paper["openalex_id"],
-                    paper["pmid"], paper["source_title"], paper["first_author"],
-                    paper["n_authors"], paper["institutions"], paper["ror_ids"],
-                    paper["patent_citation_count"], paper["scholarly_citation_count"],
-                ],
-            )
-            n_seen += 1
-
-            # Dedupe patent IDs within this paper before insert (otherwise
-            # the same (paper_lens_id, patent_lens_id) pair can be sent
-            # multiple times).
+            papers_buf.append([
+                paper["lens_id"], paper["title"], paper["year"],
+                paper["publication_type"], paper["doi"], paper["openalex_id"],
+                paper["pmid"], paper["source_title"], paper["first_author"],
+                paper["n_authors"], paper["institutions"], paper["ror_ids"],
+                paper["patent_citation_count"], paper["scholarly_citation_count"],
+            ])
             seen_pids: set[str] = set()
             for pid in paper["_patent_lens_ids"]:
                 if not pid or pid in seen_pids:
                     continue
                 seen_pids.add(pid)
-                con.execute(
-                    "INSERT OR IGNORE INTO paper_patent_links VALUES (?,?)",
-                    [paper["lens_id"], pid],
-                )
+                links_buf.append([paper["lens_id"], pid])
+            n_seen += 1
 
-            # Periodic commit to bound memory.
-            if n_seen % COMMIT_EVERY == 0:
-                con.execute("COMMIT")
-                con.execute("BEGIN")
+            if n_seen % BATCH_SIZE == 0:
+                _flush()
 
-            if n_seen - last_log >= 5000:
-                LOG.info(f"  Phase 1: {n_seen:,} papers seen...")
+            if n_seen - last_log >= 10000:
+                LOG.info(f"  Phase 1: {n_seen:,} papers staged...")
                 last_log = n_seen
-        con.execute("COMMIT")
 
-        # Authoritative counts from the DB (after dedupe by PK)
+        _flush()
+        LOG.info(f"  Phase 1: staging complete, {n_seen:,} papers loaded")
+
+        # ────────────── Dedupe staging → final tables ──────────────
+        LOG.info("  Phase 1: deduping into final tables...")
+        # papers: keep one row per lens_id (highest patent_citation_count
+        # if a duplicate sneaks in; ties broken arbitrarily).
+        con.execute(f"""
+            CREATE TABLE _papers_dedup AS
+            SELECT lens_id, title, year, publication_type, doi, openalex_id,
+                   pmid, source_title, first_author, n_authors, institutions,
+                   ror_ids, patent_citation_count, scholarly_citation_count
+            FROM papers_stg
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY lens_id
+                ORDER BY patent_citation_count DESC NULLS LAST
+            ) = 1
+        """)
+        con.execute("DROP TABLE papers_stg")
+        con.execute("ALTER TABLE _papers_dedup RENAME TO papers")
+
+        # links: simple SET semantics
+        con.execute("""
+            CREATE TABLE _links_dedup AS
+            SELECT DISTINCT paper_lens_id, patent_lens_id
+            FROM paper_patent_links_stg
+            WHERE paper_lens_id <> '' AND patent_lens_id <> ''
+        """)
+        con.execute("DROP TABLE paper_patent_links_stg")
+        con.execute("ALTER TABLE _links_dedup RENAME TO paper_patent_links")
+
         n_papers = con.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
         n_links = con.execute("SELECT COUNT(*) FROM paper_patent_links").fetchone()[0]
         LOG.info(
@@ -531,6 +578,10 @@ def build_db(
             f" {n_links:,} unique paper-patent links"
             f" (seen {n_seen:,} Lens items total)"
         )
+
+        # Index on lens_id is needed before Phase 2 so each UPDATE WHERE
+        # lens_id = ? finds its row in O(log N) instead of O(N).
+        con.execute("CREATE INDEX idx_papers_lens_id ON papers(lens_id)")
 
         # ────────────── Phase 2: batched OpenAlex ──────────────
         if enrich_openalex and n_papers > 0:
@@ -546,9 +597,19 @@ def build_db(
 
             resolver = OpenAlexResolver(mailto=mailto)
             BATCH = 50              # OpenAlex DOIs per HTTP request
-            COMMIT_EVERY_BATCHES = 100  # commit every 100 batches (~5K papers)
             done = 0
-            con.execute("BEGIN")
+            update_buf: list[list] = []  # accumulate (openalex_id, lens_id)
+            UPDATE_FLUSH = 1000  # rows per executemany call
+
+            def _flush_updates():
+                nonlocal update_buf
+                if update_buf:
+                    con.executemany(
+                        "UPDATE papers SET openalex_id = ? WHERE lens_id = ?",
+                        update_buf,
+                    )
+                    update_buf = []
+
             for i in range(0, n_todo, BATCH):
                 batch_rows = todo_rows[i : i + BATCH]
                 dois = [r[1] for r in batch_rows]
@@ -556,22 +617,17 @@ def build_db(
                 for lens_id, doi in batch_rows:
                     wid = results.get(doi, "")
                     if wid:
-                        con.execute(
-                            "UPDATE papers SET openalex_id = ? WHERE lens_id = ?",
-                            [wid, lens_id],
-                        )
+                        update_buf.append([wid, lens_id])
                         n_oa_resolved += 1
                 done += len(batch_rows)
-                # Periodic commit to keep transaction memory bounded.
-                if ((i // BATCH) + 1) % COMMIT_EVERY_BATCHES == 0:
-                    con.execute("COMMIT")
-                    con.execute("BEGIN")
-                if (i // BATCH) % 20 == 0:
+                if len(update_buf) >= UPDATE_FLUSH:
+                    _flush_updates()
+                if (i // BATCH) % 50 == 0:
                     LOG.info(
                         f"  Phase 2: {done:,}/{n_todo:,} processed"
                         f" / {n_oa_resolved:,} resolved"
                     )
-            con.execute("COMMIT")
+            _flush_updates()
             LOG.info(
                 f"Phase 2 complete: {n_oa_resolved:,} OpenAlex Work IDs resolved"
             )
