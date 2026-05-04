@@ -449,6 +449,14 @@ def build_db(
         output_path.unlink()
 
     con = duckdb.connect(str(output_path))
+    # Lower memory overhead for the bulk-insert workload. DuckDB holds row
+    # ordering metadata for each row in an active transaction; for our
+    # workload (millions of small rows) this can balloon to many GB and
+    # OOM the process. We don't care about insertion order, so disable it.
+    try:
+        con.execute("SET preserve_insertion_order = false")
+    except Exception:
+        pass
     con.execute(SCHEMA_PAPERS)
     con.execute(SCHEMA_LINKS)
     con.execute(SCHEMA_META)
@@ -460,13 +468,18 @@ def build_db(
     try:
         # ────────────── Phase 1: stream Lens → DB ──────────────
         LOG.info("Phase 1/3: streaming Lens results into DuckDB...")
-        # Use a transaction for fast bulk insert.
         # IMPORTANT: use INSERT OR IGNORE rather than try/except. DuckDB's
         # MVCC transactions enter an aborted state on a constraint violation
         # within an active transaction; subsequent statements then fail with
         # 'TransactionContext Error: Current transaction is aborted'. INSERT
         # OR IGNORE silently skips the duplicate row without raising, which
         # keeps the transaction healthy.
+        #
+        # ALSO: commit periodically. A single open transaction across millions
+        # of inserts retains undo information in memory and can OOM
+        # (we observed ~12.7 GiB RAM usage on a 350K-paper run before this
+        # fix). Periodic COMMIT releases that memory.
+        COMMIT_EVERY = 5000  # papers per transaction window
         con.execute("BEGIN")
         n_seen = 0
         last_log = 0
@@ -500,6 +513,11 @@ def build_db(
                     [paper["lens_id"], pid],
                 )
 
+            # Periodic commit to bound memory.
+            if n_seen % COMMIT_EVERY == 0:
+                con.execute("COMMIT")
+                con.execute("BEGIN")
+
             if n_seen - last_log >= 5000:
                 LOG.info(f"  Phase 1: {n_seen:,} papers seen...")
                 last_log = n_seen
@@ -527,7 +545,8 @@ def build_db(
             )
 
             resolver = OpenAlexResolver(mailto=mailto)
-            BATCH = 50
+            BATCH = 50              # OpenAlex DOIs per HTTP request
+            COMMIT_EVERY_BATCHES = 100  # commit every 100 batches (~5K papers)
             done = 0
             con.execute("BEGIN")
             for i in range(0, n_todo, BATCH):
@@ -543,6 +562,10 @@ def build_db(
                         )
                         n_oa_resolved += 1
                 done += len(batch_rows)
+                # Periodic commit to keep transaction memory bounded.
+                if ((i // BATCH) + 1) % COMMIT_EVERY_BATCHES == 0:
+                    con.execute("COMMIT")
+                    con.execute("BEGIN")
                 if (i // BATCH) % 20 == 0:
                     LOG.info(
                         f"  Phase 2: {done:,}/{n_todo:,} processed"
