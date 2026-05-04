@@ -143,37 +143,52 @@ def lens_scroll_search(
 # ──────────────────────────────────────────────────────────────────────────
 # Top-papers fetch: Japan top-8 institutions × cited by patent
 # ──────────────────────────────────────────────────────────────────────────
+def _build_scope_query(
+    ror_ids: list[str] | None,
+    country_code: str | None,
+) -> dict:
+    """
+    Build the Lens Scholar `query` clause.
+
+    Pass either:
+      - ror_ids: filter to authors affiliated with any of these ROR IDs
+      - country_code: filter to authors with at least one institutional
+        affiliation in the given country (e.g., "JP" for all-Japan mode)
+    """
+    must: list[dict] = [{"match": {"has_patent_citations": True}}]
+    if ror_ids:
+        must.append({"terms": {"author.affiliation.ror_id": ror_ids}})
+    elif country_code:
+        must.append({"term": {"author.affiliation.address.country_code": country_code}})
+    else:
+        raise ValueError("Either ror_ids or country_code must be provided.")
+    return {"bool": {"must": must}}
+
+
 def fetch_top_papers(
     api_key: str,
-    ror_ids: list[str],
+    ror_ids: list[str] | None = None,
+    country_code: str | None = None,
     max_papers: int = 10000,
     page_size: int = 500,
-) -> list[dict]:
+) -> Iterator[dict]:
     """
-    Pull top N papers (by patent citation count, descending) where at least
-    one author is affiliated with any of the given ROR institutions and the
-    paper has been cited by at least one patent.
+    Yield top N papers (by patent citation count, descending) matching the
+    given scope (either an explicit ROR list or a country_code).
 
-    Returns a fully materialised list, not a generator — see comment inside.
+    The function is a generator — caller must consume each item quickly to
+    keep the Lens scroll context alive (1-minute TTL). With Phase-1-only
+    work (normalise + DuckDB insert, no per-item HTTP), throughput is well
+    under the TTL limit even on slow machines.
     """
-    query = {
-        "bool": {
-            "must": [
-                {"terms": {"author.affiliation.ror_id": ror_ids}},
-                {"match": {"has_patent_citations": True}},
-            ]
-        }
-    }
+    query = _build_scope_query(ror_ids, country_code)
     # NOTE: Lens has inconsistent naming between search and response fields.
     # Sort/search uses `referenced_by_patent_count` (the new recommended name;
     # the deprecated alias `patent_citation_count` (singular) also works), but
     # the response payload returns `patent_citations_count` (plural).
     sort = [{"referenced_by_patent_count": "desc"}]
-    # Project only what we actually use, to keep responses small.
-    # NOTE: Lens response naming is inconsistent — confirmed working:
-    #   patent_citations, patent_citations_count, scholarly_citations_count
-    # The searchable field `referenced_by_count` is NOT a valid response/
-    # projection name (the API returns 'Unrecognized fields' for it).
+    # Projection: response field names. `referenced_by_count` is NOT valid
+    # for include — use scholarly_citations_count (matches Lens UI label).
     include = [
         "lens_id",
         "title",
@@ -187,21 +202,14 @@ def fetch_top_papers(
         "scholarly_citations_count",
     ]
 
-    # IMPORTANT: collect everything from Lens FIRST and return as a list.
-    # If we yielded items lazily, downstream OpenAlex resolution (~200ms per
-    # paper) would block long enough for the scroll context to expire (1min
-    # TTL on the server side), causing HTTP 400 'Cannot find valid query for
-    # the provided scroll id'. By materialising all pages here, the entire
-    # Lens fetch finishes in ~1 minute even for 10K papers, well within TTL.
-    items: list[dict] = []
+    seen = 0
     for item in lens_scroll_search(api_key, query, sort, include, size=page_size):
-        items.append(item)
-        if len(items) >= max_papers:
-            break
-        if len(items) % 1000 == 0:
-            LOG.info(f"  Lens fetch: {len(items):,} papers...")
-    LOG.info(f"Lens fetch complete: {len(items):,} papers collected")
-    return items
+        if seen >= max_papers:
+            return
+        yield item
+        seen += 1
+        if seen % 5000 == 0:
+            LOG.info(f"  Phase 1 Lens fetch: {seen:,} papers received...")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -302,6 +310,79 @@ class OpenAlexResolver:
         self._cache[doi] = ""
         return None
 
+    def resolve_batch(self, dois: list[str]) -> dict[str, str]:
+        """
+        Bulk resolve up to 50 DOIs per request. Returns a mapping
+        {original_doi -> openalex_work_id (or "")}.
+
+        OpenAlex's Works endpoint supports a pipe-separated list of up to
+        50 DOIs in a single filter. This is dramatically faster than the
+        per-DOI form: ~7,000 batch requests cover ~352K DOIs in ~3 minutes
+        on the polite-pool tier.
+        """
+        if not dois:
+            return {}
+        # Normalise DOIs: lowercase + strip URL prefix for matching
+        norm_map: dict[str, str] = {}  # normalised -> original
+        unique_norm: list[str] = []
+        for d in dois:
+            if not d:
+                continue
+            n = d.lower().replace("https://doi.org/", "").strip()
+            if n and n not in norm_map:
+                norm_map[n] = d
+                unique_norm.append(n)
+
+        out: dict[str, str] = {d: "" for d in dois}
+
+        BATCH = 50
+        for i in range(0, len(unique_norm), BATCH):
+            chunk = unique_norm[i : i + BATCH]
+            cached_only = [n for n in chunk if n in self._cache]
+            for n in cached_only:
+                out[norm_map[n]] = self._cache[n]
+            uncached = [n for n in chunk if n not in self._cache]
+            if not uncached:
+                continue
+            params = {
+                "filter": "doi:" + "|".join(uncached),
+                "per-page": 50,
+                "select": "id,doi",
+            }
+            if self.mailto:
+                params["mailto"] = self.mailto
+            try:
+                r = self._session.get(OPENALEX_BASE, params=params, timeout=60)
+                if r.status_code != 200:
+                    LOG.debug(
+                        f"OpenAlex batch returned {r.status_code}: {r.text[:200]}"
+                    )
+                    # Mark all as resolved-but-empty so we don't retry
+                    for n in uncached:
+                        self._cache[n] = ""
+                    continue
+                results = r.json().get("results") or []
+                returned: dict[str, str] = {}
+                for w in results:
+                    w_doi = (w.get("doi") or "").lower().replace(
+                        "https://doi.org/", ""
+                    ).strip()
+                    w_id = (w.get("id") or "").replace(
+                        "https://openalex.org/", ""
+                    )
+                    if w_doi and w_id:
+                        returned[w_doi] = w_id
+                for n in uncached:
+                    wid = returned.get(n, "")
+                    self._cache[n] = wid
+                    out[norm_map[n]] = wid
+            except Exception as e:
+                LOG.debug(f"OpenAlex batch failed for {len(uncached)} DOIs: {e}")
+                for n in uncached:
+                    self._cache[n] = ""
+
+        return out
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # DuckDB schema and writer
@@ -346,12 +427,22 @@ CREATE TABLE build_meta (
 def build_db(
     output_path: Path,
     paper_iter: Iterator[dict],
-    institutions: list[dict],
+    institutions_label: str,
     top_papers: int,
     enrich_openalex: bool = True,
     mailto: str = "",
 ) -> tuple[int, int]:
-    """Create a DuckDB at `output_path` and stream papers + links into it."""
+    """
+    Create a DuckDB at `output_path` and populate it in three phases:
+
+      Phase 1  Stream Lens scholar items into `papers` and
+               `paper_patent_links` (no per-item OpenAlex lookups, so the
+               Lens scroll TTL is respected even for very large fetches).
+      Phase 2  Bulk-resolve DOIs to OpenAlex Work IDs in batches of 50,
+               UPDATE papers in place. ~5-10x faster than per-DOI calls
+               and constant memory.
+      Phase 3  Build indexes, write build_meta.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
         LOG.info(f"Removing existing DB: {output_path}")
@@ -362,28 +453,23 @@ def build_db(
     con.execute(SCHEMA_LINKS)
     con.execute(SCHEMA_META)
 
-    resolver = OpenAlexResolver(mailto=mailto) if enrich_openalex else None
-
     n_papers = 0
     n_links = 0
     n_oa_resolved = 0
 
     try:
+        # ────────────── Phase 1: stream Lens → DB ──────────────
+        LOG.info("Phase 1/3: streaming Lens results into DuckDB...")
+        # Use a transaction for fast bulk insert
+        con.execute("BEGIN")
+        last_log = 0
         for raw in paper_iter:
             paper = normalise_paper(raw)
             if not paper["lens_id"]:
                 continue
 
-            if resolver and paper["doi"] and not paper["openalex_id"]:
-                wid = resolver.resolve(paper["doi"])
-                if wid:
-                    paper["openalex_id"] = wid
-                    n_oa_resolved += 1
-
             con.execute(
-                """
-                INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
+                "INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     paper["lens_id"], paper["title"], paper["year"],
                     paper["publication_type"], paper["doi"], paper["openalex_id"],
@@ -404,13 +490,57 @@ def build_db(
                 except duckdb.ConstraintException:
                     pass  # duplicate (paper, patent) pair
 
-            if n_papers % 200 == 0:
+            if n_papers - last_log >= 5000:
                 LOG.info(
-                    f"  progress: {n_papers:,} papers / {n_links:,} patent links"
-                    f" / {n_oa_resolved:,} OpenAlex resolved"
+                    f"  Phase 1: {n_papers:,} papers / {n_links:,} links inserted"
                 )
+                last_log = n_papers
+        con.execute("COMMIT")
+        LOG.info(f"Phase 1 complete: {n_papers:,} papers / {n_links:,} links")
 
-        # Finalise: indexes
+        # ────────────── Phase 2: batched OpenAlex ──────────────
+        if enrich_openalex and n_papers > 0:
+            todo_rows = con.execute(
+                "SELECT lens_id, doi FROM papers "
+                "WHERE doi <> '' AND (openalex_id IS NULL OR openalex_id = '')"
+            ).fetchall()
+            n_todo = len(todo_rows)
+            LOG.info(
+                f"Phase 2/3: batched OpenAlex DOI->WorkID resolution"
+                f" for {n_todo:,} papers..."
+            )
+
+            resolver = OpenAlexResolver(mailto=mailto)
+            BATCH = 50
+            done = 0
+            con.execute("BEGIN")
+            for i in range(0, n_todo, BATCH):
+                batch_rows = todo_rows[i : i + BATCH]
+                dois = [r[1] for r in batch_rows]
+                results = resolver.resolve_batch(dois)
+                for lens_id, doi in batch_rows:
+                    wid = results.get(doi, "")
+                    if wid:
+                        con.execute(
+                            "UPDATE papers SET openalex_id = ? WHERE lens_id = ?",
+                            [wid, lens_id],
+                        )
+                        n_oa_resolved += 1
+                done += len(batch_rows)
+                if (i // BATCH) % 20 == 0:
+                    LOG.info(
+                        f"  Phase 2: {done:,}/{n_todo:,} processed"
+                        f" / {n_oa_resolved:,} resolved"
+                    )
+            con.execute("COMMIT")
+            LOG.info(
+                f"Phase 2 complete: {n_oa_resolved:,} OpenAlex Work IDs resolved"
+            )
+        else:
+            LOG.info("Phase 2/3: skipped (--no-openalex or empty DB)")
+
+        # ────────────── Phase 3: indexes + meta ────────────────
+        LOG.info("Phase 3/3: building indexes and writing build metadata...")
         con.execute("CREATE INDEX idx_papers_doi          ON papers(doi)")
         con.execute("CREATE INDEX idx_papers_openalex     ON papers(openalex_id)")
         con.execute("CREATE INDEX idx_papers_year         ON papers(year)")
@@ -421,7 +551,7 @@ def build_db(
             "INSERT INTO build_meta VALUES (now(), ?, ?, ?)",
             [
                 top_papers,
-                "; ".join(f"{i['name_en']} ({i['ror']})" for i in institutions),
+                institutions_label,
                 json.dumps(
                     {
                         "openalex_enrichment": enrich_openalex,
@@ -548,6 +678,25 @@ def parse_args() -> argparse.Namespace:
         help="Just verify the configured ROR IDs against ror.org and exit.",
     )
     p.add_argument(
+        "--all-japan",
+        action="store_true",
+        help=(
+            "Switch from the default ROR-list scope (top 8 universities) "
+            "to a country-wide scope using "
+            "author.affiliation.address.country_code: 'JP'. "
+            "This covers ALL Japanese-affiliated papers cited by patents "
+            "(~352K total per Lens UI). Combine with a larger --top-papers."
+        ),
+    )
+    p.add_argument(
+        "--country",
+        default="JP",
+        help=(
+            "Country code used by --all-japan (alpha-2; default JP). "
+            "Useful if you want to repurpose this script for another country."
+        ),
+    )
+    p.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging."
     )
     return p.parse_args()
@@ -577,33 +726,44 @@ def main() -> int:
         )
         return 2
 
-    LOG.info("Target institutions:")
-    for inst in TOP_INSTITUTIONS:
-        LOG.info(f"  - {inst['name_ja']}  / {inst['name_en']}  (ROR: {inst['ror']})")
+    if args.all_japan:
+        institutions_label = (
+            f"All institutions in country={args.country.upper()} "
+            f"(via author.affiliation.address.country_code)"
+        )
+        LOG.info(
+            f"Scope: ALL institutions in country '{args.country.upper()}' "
+            f"(country-wide mode)"
+        )
+        scope_kwargs = {"country_code": args.country.upper(), "ror_ids": None}
+    else:
+        institutions_label = "; ".join(
+            f"{i['name_en']} ({i['ror']})" for i in TOP_INSTITUTIONS
+        )
+        LOG.info("Scope: Top 8 Japanese research universities")
+        for inst in TOP_INSTITUTIONS:
+            LOG.info(
+                f"  - {inst['name_ja']}  / {inst['name_en']}  (ROR: {inst['ror']})"
+            )
+        scope_kwargs = {"ror_ids": ror_ids, "country_code": None}
+
     LOG.info(f"Fetching top {args.top_papers:,} papers by patent citation count")
-    LOG.info(f"OpenAlex enrichment: {'OFF' if args.no_openalex else 'ON'}")
+    LOG.info(f"OpenAlex enrichment: {'OFF' if args.no_openalex else 'ON (batched)'}")
 
     output = Path(args.output).expanduser().resolve()
     LOG.info(f"Output DuckDB: {output}")
 
-    LOG.info("Phase 1/2: fetching papers from Lens (scroll, ~1 minute for 10K)...")
-    raw_items = fetch_top_papers(
-        args.api_key, ror_ids,
+    paper_iter = fetch_top_papers(
+        args.api_key,
         max_papers=args.top_papers,
         page_size=args.page_size,
+        **scope_kwargs,
     )
 
-    LOG.info(
-        "Phase 2/2: building DuckDB" + (
-            " with OpenAlex DOI->WorkID resolution (~10-20 min for 10K)..."
-            if not args.no_openalex
-            else " (OpenAlex enrichment OFF)..."
-        )
-    )
     n_papers, n_links = build_db(
         output,
-        iter(raw_items),
-        TOP_INSTITUTIONS,
+        paper_iter,
+        institutions_label,
         args.top_papers,
         enrich_openalex=not args.no_openalex,
         mailto=args.mailto,
