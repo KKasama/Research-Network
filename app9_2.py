@@ -1697,6 +1697,7 @@ with st.sidebar:
         tl("① データ収集・保存","① Collect & Save"),
         tl("② 分析・可視化","② Analyze & Visualize"),
         tl("③ KAKEN助成金分析","③ KAKEN Grant Analysis"),
+        tl("④ Japan重要論文DB","④ Japan Top Papers DB"),
     ])
 
 # ────────────────────────────────────────────
@@ -4623,3 +4624,291 @@ if tl("③ KAKEN助成金分析","③ KAKEN Grant Analysis") in step:
                     tl("📥 CSVダウンロード","📥 Download CSV"),
                     data=_csv, file_name="kaken_grants.csv", mime="text/csv"
                 )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ④ Japan Top Papers DB (Pre-built local DuckDB viewer)
+# Backed by data/japan_papers_patents.duckdb produced by
+# scripts/build_japan_paper_patent_db.py.
+# ════════════════════════════════════════════════════════════════════════════
+JAPAN_DB_PATH = Path(__file__).parent / "data" / "japan_papers_patents.duckdb"
+
+# ROR -> (Japanese name, English name)
+JAPAN_INSTITUTIONS = [
+    ("057zh3y96", "東京大学",     "University of Tokyo"),
+    ("02kpeqv85", "京都大学",     "Kyoto University"),
+    ("035t8zc32", "大阪大学",     "Osaka University"),
+    ("01dq60k83", "東北大学",     "Tohoku University"),
+    ("00p4k0j84", "九州大学",     "Kyushu University"),
+    ("04chrp450", "名古屋大学",   "Nagoya University"),
+    ("02e16g702", "北海道大学",   "Hokkaido University"),
+    ("0112mx960", "東京工業大学", "Tokyo Institute of Technology"),
+]
+
+
+@st.cache_resource(show_spinner=False)
+def _japan_db_connect(db_path: str):
+    """Open the pre-built DuckDB read-only. Returns (status, con)."""
+    try:
+        import duckdb  # type: ignore
+    except ImportError:
+        return ("missing_duckdb", None)
+    p = Path(db_path)
+    if not p.exists():
+        return ("missing_db", None)
+    try:
+        return ("ok", duckdb.connect(str(p), read_only=True))
+    except Exception as e:
+        return (f"error: {e}", None)
+
+
+def _japan_db_meta(con):
+    try:
+        row = con.execute("SELECT * FROM build_meta LIMIT 1").fetchone()
+        if not row:
+            return None
+        built_at, top_papers, institutions, notes = row
+        notes_obj = {}
+        try:
+            notes_obj = json.loads(notes) if notes else {}
+        except Exception:
+            pass
+        return {
+            "built_at": built_at,
+            "top_papers": top_papers,
+            "institutions": institutions,
+            "openalex_resolved": notes_obj.get("openalex_resolved", 0),
+        }
+    except Exception:
+        return None
+
+
+if tl("④ Japan重要論文DB","④ Japan Top Papers DB") in step:
+    st.title(tl(
+        "④ Japan重要論文DB（事前ビルド済み）",
+        "④ Japan Top Papers DB (Pre-built)",
+    ))
+    st.caption(tl(
+        "旧帝大＋東工大の論文のうち、特許に多く引用されたものをローカルDuckDBから検索・閲覧します。",
+        "Browse top patent-cited papers from the 8 leading Japanese research universities, served from a local DuckDB.",
+    ))
+
+    with st.sidebar:
+        st.markdown("---")
+        db_path_input = st.text_input(
+            tl("DBファイルパス","DB file path"),
+            value=str(JAPAN_DB_PATH),
+            help=tl(
+                "scripts/build_japan_paper_patent_db.py で生成したDuckDB。",
+                "DuckDB built by scripts/build_japan_paper_patent_db.py.",
+            ),
+            key="japan_db_path",
+        )
+
+    status, con = _japan_db_connect(db_path_input)
+
+    if status == "missing_duckdb":
+        st.error(tl(
+            "duckdb がインストールされていません。`pip install duckdb` を実行してください。",
+            "duckdb is not installed. Run `pip install duckdb`.",
+        ))
+        st.stop()
+    if status == "missing_db" or con is None:
+        st.warning(tl(
+            f"DuckDBファイルが見つかりません: `{db_path_input}`",
+            f"DuckDB file not found: `{db_path_input}`",
+        ))
+        st.markdown(tl(
+            "ターミナルで以下を実行して事前ビルドしてください：",
+            "Run the build pipeline first:",
+        ))
+        st.code(
+            "python scripts/build_japan_paper_patent_db.py "
+            "--output data/japan_papers_patents.duckdb "
+            "--top-papers 10000 --mailto your@email.com",
+            language="bash",
+        )
+        st.stop()
+    if isinstance(status, str) and status.startswith("error"):
+        st.error(tl(f"DB接続エラー: {status}", f"DB connection error: {status}"))
+        st.stop()
+
+    # ── Build metadata ─────────────────────────────────────
+    meta = _japan_db_meta(con)
+    if meta:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            tl("ビルド日時","Built at"),
+            str(meta["built_at"])[:19] if meta["built_at"] else "?",
+        )
+        try:
+            n_papers_total = con.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        except Exception:
+            n_papers_total = 0
+        try:
+            n_links_total = con.execute("SELECT COUNT(*) FROM paper_patent_links").fetchone()[0]
+        except Exception:
+            n_links_total = 0
+        c2.metric(tl("収録論文数","Papers"), f"{n_papers_total:,}")
+        c3.metric(tl("特許リンク数","Patent links"), f"{n_links_total:,}")
+        c4.metric(tl("OpenAlex解決数","OpenAlex resolved"), f"{meta['openalex_resolved']:,}")
+
+    # ── Sidebar filters ────────────────────────────────────
+    with st.sidebar:
+        st.subheader(tl("フィルタ", "Filters"))
+
+        inst_label = lambda i: i[1] if st.session_state.lang == "ja" else i[2]
+        all_labels = [inst_label(i) for i in JAPAN_INSTITUTIONS]
+        sel_inst_labels = st.multiselect(
+            tl("機関","Institutions"),
+            options=all_labels,
+            default=all_labels,
+            key="japan_inst_filter",
+        )
+        sel_rors = [i[0] for i in JAPAN_INSTITUTIONS if inst_label(i) in sel_inst_labels]
+
+        try:
+            yr_row = con.execute(
+                "SELECT MIN(year), MAX(year) FROM papers WHERE year IS NOT NULL"
+            ).fetchone()
+            yr_min_db = int(yr_row[0]) if yr_row and yr_row[0] is not None else 1900
+            yr_max_db = int(yr_row[1]) if yr_row and yr_row[1] is not None else 2026
+        except Exception:
+            yr_min_db, yr_max_db = 1900, 2026
+        sel_year = st.slider(
+            tl("出版年","Year"),
+            yr_min_db, yr_max_db,
+            (yr_min_db, yr_max_db),
+            key="japan_year_filter",
+        )
+
+        sel_keyword = st.text_input(
+            tl("キーワード（タイトル/著者/誌名）","Keyword (title/author/source)"),
+            value="",
+            key="japan_keyword_filter",
+        )
+
+        sel_only_openalex = st.checkbox(
+            tl("OpenAlex Work IDがある論文のみ", "OpenAlex Work ID only"),
+            value=False, key="japan_only_oa",
+        )
+
+        sort_options = {
+            tl("特許被引用数（多い順）","Patent citations (desc)"): "patent_citation_count DESC",
+            tl("学術引用数（多い順）","Scholarly citations (desc)"): "scholarly_citation_count DESC",
+            tl("出版年（新しい順）","Year (newest first)"): "year DESC",
+            tl("出版年（古い順）","Year (oldest first)"): "year ASC",
+        }
+        sel_sort_label = st.radio(
+            tl("並び替え","Sort by"),
+            list(sort_options.keys()), key="japan_sort_by",
+        )
+        sort_clause = sort_options[sel_sort_label]
+
+        sel_limit = st.slider(
+            tl("表示件数","Rows"), 10, 2000, 100, step=10,
+            key="japan_row_limit",
+        )
+
+    # ── Build SQL ──────────────────────────────────────────
+    if not sel_rors:
+        st.info(tl("機関を1つ以上選択してください。","Select at least one institution."))
+        st.stop()
+
+    where = ["year BETWEEN ? AND ?"]
+    params: list = [sel_year[0], sel_year[1]]
+
+    ror_or = " OR ".join(["ror_ids LIKE ?"] * len(sel_rors))
+    where.append(f"({ror_or})")
+    params.extend([f"%{r}%" for r in sel_rors])
+
+    if sel_keyword.strip():
+        where.append("(title LIKE ? OR first_author LIKE ? OR source_title LIKE ?)")
+        kw = f"%{sel_keyword.strip()}%"
+        params.extend([kw, kw, kw])
+
+    if sel_only_openalex:
+        where.append("openalex_id <> ''")
+
+    where_clause = " AND ".join(where)
+
+    # ── Match stats ─────────────────────────────────────────
+    try:
+        stat_row = con.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(patent_citation_count), 0) FROM papers WHERE {where_clause}",
+            params,
+        ).fetchone()
+        n_match, total_pat = (stat_row[0] or 0), (stat_row[1] or 0)
+    except Exception as _e:
+        st.error(f"Query error: {_e}")
+        st.stop()
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric(tl("ヒット件数","Matches"), f"{n_match:,}")
+    s2.metric(tl("特許被引用合計","Total patent cites"), f"{int(total_pat):,}")
+    s3.metric(
+        tl("平均特許被引用","Avg patent cites"),
+        f"{(total_pat / n_match):.1f}" if n_match else "0",
+    )
+
+    # ── Main table ──────────────────────────────────────────
+    sql = f"""
+        SELECT
+          ROW_NUMBER() OVER (ORDER BY {sort_clause}) AS rank,
+          first_author       AS author,
+          title,
+          year,
+          source_title       AS source,
+          patent_citation_count    AS patent_cites,
+          scholarly_citation_count AS scholar_cites,
+          doi,
+          openalex_id,
+          institutions
+        FROM papers
+        WHERE {where_clause}
+        ORDER BY {sort_clause}
+        LIMIT ?
+    """
+    try:
+        df_papers = con.execute(sql, params + [sel_limit]).df()
+    except Exception as _e:
+        st.error(f"Query error: {_e}")
+        st.stop()
+
+    st.dataframe(df_papers, use_container_width=True, hide_index=True)
+
+    _csv_bytes = df_papers.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        tl("📥 CSVダウンロード","📥 Download CSV"),
+        data=_csv_bytes,
+        file_name="japan_top_papers.csv",
+        mime="text/csv",
+        key="japan_csv_dl",
+    )
+
+    # ── Per-institution aggregate ──────────────────────────
+    with st.expander(tl("📊 機関別集計（フィルタ適用後）","📊 Per-institution stats (filtered)"), expanded=False):
+        case_lines = []
+        for ror, name_ja, name_en in JAPAN_INSTITUTIONS:
+            label = name_ja if st.session_state.lang == "ja" else name_en
+            case_lines.append(f"WHEN ror_ids LIKE '%{ror}%' THEN '{label}'")
+        case_sql = "\n              ".join(case_lines)
+        inst_sql = f"""
+            SELECT
+              CASE
+                {case_sql}
+                ELSE 'Other'
+              END AS univ,
+              COUNT(*) AS n_papers,
+              SUM(patent_citation_count) AS total_patent_cites,
+              ROUND(AVG(patent_citation_count), 1) AS avg_patent_cites
+            FROM papers
+            WHERE {where_clause}
+            GROUP BY 1
+            ORDER BY total_patent_cites DESC
+        """
+        try:
+            df_inst = con.execute(inst_sql, params).df()
+            st.dataframe(df_inst, use_container_width=True, hide_index=True)
+        except Exception as _e:
+            st.error(f"Aggregate query error: {_e}")
