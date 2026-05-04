@@ -162,7 +162,11 @@ def fetch_top_papers(
             ]
         }
     }
-    sort = [{"patent_citations_count": "desc"}]
+    # NOTE: Lens has inconsistent naming between search and response fields.
+    # Sort/search uses `referenced_by_patent_count` (the new recommended name;
+    # the deprecated alias `patent_citation_count` (singular) also works), but
+    # the response payload returns `patent_citations_count` (plural).
+    sort = [{"referenced_by_patent_count": "desc"}]
     # Project only what we actually use, to keep responses small.
     include = [
         "lens_id",
