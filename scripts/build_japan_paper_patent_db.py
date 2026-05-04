@@ -168,6 +168,10 @@ def fetch_top_papers(
     # the response payload returns `patent_citations_count` (plural).
     sort = [{"referenced_by_patent_count": "desc"}]
     # Project only what we actually use, to keep responses small.
+    # NOTE: Lens response naming is inconsistent — confirmed working:
+    #   patent_citations, patent_citations_count, scholarly_citations_count
+    # The searchable field `referenced_by_count` is NOT a valid response/
+    # projection name (the API returns 'Unrecognized fields' for it).
     include = [
         "lens_id",
         "title",
@@ -178,7 +182,7 @@ def fetch_top_papers(
         "authors",
         "patent_citations",
         "patent_citations_count",
-        "referenced_by_count",
+        "scholarly_citations_count",
     ]
 
     seen = 0
@@ -246,7 +250,7 @@ def normalise_paper(item: dict) -> dict:
         "institutions": "; ".join(sorted(institutions))[:2000],
         "ror_ids": "; ".join(sorted(matched_rors)),
         "patent_citation_count": item.get("patent_citations_count") or 0,
-        "scholarly_citation_count": item.get("referenced_by_count") or 0,
+        "scholarly_citation_count": item.get("scholarly_citations_count") or 0,
         "_patent_lens_ids": patent_ids,
     }
 
