@@ -460,8 +460,15 @@ def build_db(
     try:
         # ────────────── Phase 1: stream Lens → DB ──────────────
         LOG.info("Phase 1/3: streaming Lens results into DuckDB...")
-        # Use a transaction for fast bulk insert
+        # Use a transaction for fast bulk insert.
+        # IMPORTANT: use INSERT OR IGNORE rather than try/except. DuckDB's
+        # MVCC transactions enter an aborted state on a constraint violation
+        # within an active transaction; subsequent statements then fail with
+        # 'TransactionContext Error: Current transaction is aborted'. INSERT
+        # OR IGNORE silently skips the duplicate row without raising, which
+        # keeps the transaction healthy.
         con.execute("BEGIN")
+        n_seen = 0
         last_log = 0
         for raw in paper_iter:
             paper = normalise_paper(raw)
@@ -469,7 +476,7 @@ def build_db(
                 continue
 
             con.execute(
-                "INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     paper["lens_id"], paper["title"], paper["year"],
                     paper["publication_type"], paper["doi"], paper["openalex_id"],
@@ -478,25 +485,34 @@ def build_db(
                     paper["patent_citation_count"], paper["scholarly_citation_count"],
                 ],
             )
-            n_papers += 1
+            n_seen += 1
 
+            # Dedupe patent IDs within this paper before insert (otherwise
+            # the same (paper_lens_id, patent_lens_id) pair can be sent
+            # multiple times).
+            seen_pids: set[str] = set()
             for pid in paper["_patent_lens_ids"]:
-                try:
-                    con.execute(
-                        "INSERT INTO paper_patent_links VALUES (?,?)",
-                        [paper["lens_id"], pid],
-                    )
-                    n_links += 1
-                except duckdb.ConstraintException:
-                    pass  # duplicate (paper, patent) pair
-
-            if n_papers - last_log >= 5000:
-                LOG.info(
-                    f"  Phase 1: {n_papers:,} papers / {n_links:,} links inserted"
+                if not pid or pid in seen_pids:
+                    continue
+                seen_pids.add(pid)
+                con.execute(
+                    "INSERT OR IGNORE INTO paper_patent_links VALUES (?,?)",
+                    [paper["lens_id"], pid],
                 )
-                last_log = n_papers
+
+            if n_seen - last_log >= 5000:
+                LOG.info(f"  Phase 1: {n_seen:,} papers seen...")
+                last_log = n_seen
         con.execute("COMMIT")
-        LOG.info(f"Phase 1 complete: {n_papers:,} papers / {n_links:,} links")
+
+        # Authoritative counts from the DB (after dedupe by PK)
+        n_papers = con.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        n_links = con.execute("SELECT COUNT(*) FROM paper_patent_links").fetchone()[0]
+        LOG.info(
+            f"Phase 1 complete: {n_papers:,} unique papers /"
+            f" {n_links:,} unique paper-patent links"
+            f" (seen {n_seen:,} Lens items total)"
+        )
 
         # ────────────── Phase 2: batched OpenAlex ──────────────
         if enrich_openalex and n_papers > 0:
