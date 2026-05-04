@@ -148,11 +148,13 @@ def fetch_top_papers(
     ror_ids: list[str],
     max_papers: int = 10000,
     page_size: int = 500,
-) -> Iterator[dict]:
+) -> list[dict]:
     """
     Pull top N papers (by patent citation count, descending) where at least
     one author is affiliated with any of the given ROR institutions and the
     paper has been cited by at least one patent.
+
+    Returns a fully materialised list, not a generator — see comment inside.
     """
     query = {
         "bool": {
@@ -185,12 +187,21 @@ def fetch_top_papers(
         "scholarly_citations_count",
     ]
 
-    seen = 0
+    # IMPORTANT: collect everything from Lens FIRST and return as a list.
+    # If we yielded items lazily, downstream OpenAlex resolution (~200ms per
+    # paper) would block long enough for the scroll context to expire (1min
+    # TTL on the server side), causing HTTP 400 'Cannot find valid query for
+    # the provided scroll id'. By materialising all pages here, the entire
+    # Lens fetch finishes in ~1 minute even for 10K papers, well within TTL.
+    items: list[dict] = []
     for item in lens_scroll_search(api_key, query, sort, include, size=page_size):
-        if seen >= max_papers:
-            return
-        yield item
-        seen += 1
+        items.append(item)
+        if len(items) >= max_papers:
+            break
+        if len(items) % 1000 == 0:
+            LOG.info(f"  Lens fetch: {len(items):,} papers...")
+    LOG.info(f"Lens fetch complete: {len(items):,} papers collected")
+    return items
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -575,15 +586,23 @@ def main() -> int:
     output = Path(args.output).expanduser().resolve()
     LOG.info(f"Output DuckDB: {output}")
 
-    paper_iter = fetch_top_papers(
+    LOG.info("Phase 1/2: fetching papers from Lens (scroll, ~1 minute for 10K)...")
+    raw_items = fetch_top_papers(
         args.api_key, ror_ids,
         max_papers=args.top_papers,
         page_size=args.page_size,
     )
 
+    LOG.info(
+        "Phase 2/2: building DuckDB" + (
+            " with OpenAlex DOI->WorkID resolution (~10-20 min for 10K)..."
+            if not args.no_openalex
+            else " (OpenAlex enrichment OFF)..."
+        )
+    )
     n_papers, n_links = build_db(
         output,
-        paper_iter,
+        iter(raw_items),
         TOP_INSTITUTIONS,
         args.top_papers,
         enrich_openalex=not args.no_openalex,
