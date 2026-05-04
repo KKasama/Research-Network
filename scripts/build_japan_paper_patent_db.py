@@ -71,7 +71,7 @@ TOP_INSTITUTIONS = [
     {"ror": "057zh3y96", "name_en": "University of Tokyo",           "name_ja": "東京大学"},
     {"ror": "02kpeqv85", "name_en": "Kyoto University",              "name_ja": "京都大学"},
     {"ror": "035t8zc32", "name_en": "Osaka University",              "name_ja": "大阪大学"},
-    {"ror": "01dq06y56", "name_en": "Tohoku University",             "name_ja": "東北大学"},
+    {"ror": "01dq60k83", "name_en": "Tohoku University",             "name_ja": "東北大学"},
     {"ror": "00p4k0j84", "name_en": "Kyushu University",             "name_ja": "九州大学"},
     {"ror": "04chrp450", "name_en": "Nagoya University",             "name_ja": "名古屋大学"},
     {"ror": "02e16g702", "name_en": "Hokkaido University",           "name_ja": "北海道大学"},
@@ -424,18 +424,58 @@ def build_db(
 # Standalone helpers
 # ──────────────────────────────────────────────────────────────────────────
 def verify_rors(ror_ids: list[str]) -> None:
-    """Quick check: print each ROR ID with its registered name from ror.org."""
+    """Quick check: print each ROR ID with its registered name from ror.org.
+
+    ROR API v2 (current) uses a different response schema than v1:
+        v1: {"name": "...", "country": {"country_code": "..."}}
+        v2: {"names": [{"value": "...", "types": ["ror_display"]}, ...],
+             "locations": [{"geonames_details": {"country_code": "..."}}]}
+
+    We try v2 first, fall back to v1 for older endpoints.
+    """
+    def parse_v2(d: dict) -> tuple[str, str]:
+        # Find the display name
+        display = ""
+        for entry in d.get("names") or []:
+            if "ror_display" in (entry.get("types") or []):
+                display = entry.get("value", "")
+                break
+        if not display:  # fallback: first name
+            names = d.get("names") or []
+            if names:
+                display = names[0].get("value", "")
+        # Find country code
+        country = ""
+        for loc in d.get("locations") or []:
+            cc = (loc.get("geonames_details") or {}).get("country_code")
+            if cc:
+                country = cc
+                break
+        return display or "?", country or "?"
+
+    def parse_v1(d: dict) -> tuple[str, str]:
+        name = d.get("name", "?")
+        country = (d.get("country") or {}).get("country_code", "?")
+        return name, country
+
     print("Verifying ROR IDs against the ROR registry...\n")
     for ror_id in ror_ids:
+        url_v2 = f"https://api.ror.org/v2/organizations/{ror_id}"
+        url_v1 = f"https://api.ror.org/organizations/{ror_id}"
         try:
-            r = requests.get(
-                f"https://api.ror.org/organizations/{ror_id}", timeout=10
-            )
+            r = requests.get(url_v2, timeout=10)
             if r.status_code == 200:
-                d = r.json()
-                name = d.get("name", "?")
-                country = (d.get("country") or {}).get("country_code", "?")
+                name, country = parse_v2(r.json())
                 print(f"  OK  {ror_id}  -->  {name} ({country})")
+                continue
+            if r.status_code == 404:
+                print(f"  FAIL {ror_id}  -->  HTTP 404 (ROR ID does not exist)")
+                continue
+            # Try v1 fallback for non-404 errors
+            r = requests.get(url_v1, timeout=10)
+            if r.status_code == 200:
+                name, country = parse_v1(r.json())
+                print(f"  OK  {ror_id}  -->  {name} ({country})  [v1]")
             else:
                 print(f"  FAIL {ror_id}  -->  HTTP {r.status_code}")
         except Exception as e:
@@ -505,7 +545,12 @@ def main() -> int:
 
     if not args.api_key:
         sys.stderr.write(
-            "ERROR: Lens API key required. Set LENS_API_KEY or pass --api-key.\n"
+            "ERROR: Lens API key required.\n"
+            "  Set the env var (recommended):\n"
+            "      export LENS_API_KEY=\"your_lens_token\"\n"
+            "  Or pass it explicitly:\n"
+            "      python build_japan_paper_patent_db.py --api-key your_lens_token ...\n"
+            "  Get a key at https://www.lens.org/lens/user/subscriptions\n"
         )
         return 2
 
