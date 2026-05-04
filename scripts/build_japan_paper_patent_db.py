@@ -226,9 +226,13 @@ def normalise_paper(item: dict) -> dict:
             name = aff.get("name")
             if name:
                 institutions.add(name)
-            ror = aff.get("ror_id")
-            if ror:
-                matched_rors.add(ror)
+            # ROR is nested in `affiliations[].ids[]` as {type: "ror", value: "..."}
+            # NOT under a top-level "ror_id" key.
+            for id_ent in aff.get("ids") or []:
+                if (id_ent.get("type") or "").lower() == "ror":
+                    val = id_ent.get("value") or ""
+                    if val:
+                        matched_rors.add(val)
 
     # Citing patents
     cite_patents = item.get("patent_citations") or []
