@@ -3,3 +3,9 @@ __pycache__/
 .streamlit/secrets.toml
 *.pyc
 .DS_Store
+
+# Pre-built local databases (Step 1+) — large binaries, kept out of git.
+data/*.duckdb
+data/*.duckdb.wal
+data/*.sqlite
+data/*.parquet
