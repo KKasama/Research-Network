@@ -280,14 +280,14 @@ def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter="",
             }
         })
 
-    # 年範囲フィルタ
+    # 年範囲フィルタ（Lens API は date_published を使う）
     if year_from or year_to:
         range_clause = {}
         if year_from:
-            range_clause["gte"] = int(year_from)
+            range_clause["gte"] = f"{int(year_from)}-01-01"
         if year_to:
-            range_clause["lte"] = int(year_to)
-        must_clauses.append({"range": {"year_published": range_clause}})
+            range_clause["lte"] = f"{int(year_to)}-12-31"
+        must_clauses.append({"range": {"date_published": range_clause}})
 
     # 管轄（出願国）フィルタ
     if jurisdictions:
@@ -295,12 +295,12 @@ def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter="",
 
     # 特許タイプフィルタ
     if doc_types:
-        must_clauses.append({"terms": {"doc_type": doc_types}})
+        must_clauses.append({"terms": {"publication_type": doc_types}})
 
     payload = {
         "query": {"bool": {"must": must_clauses}},
         "size": min(max_patents, 100),
-        "sort": [{"year_published": "desc"}],
+        "sort": [{"date_published": "desc"}],
         "include": [
             "lens_id",
             "biblio.invention_title",
@@ -309,9 +309,8 @@ def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter="",
             "biblio.classifications_ipcr",
             "abstract",
             "date_published",
-            "year_published",
             "jurisdiction",
-            "doc_type",
+            "publication_type",
         ],
     }
     try:
@@ -413,13 +412,17 @@ def fetch_patents_lens(keyword, api_key, max_patents=50, inventor_filter="",
                     "lens_scholar_id": lens_scholar_id,
                 })
 
+        _date_pub = item.get("date_published", "")
+        _year_pub = None
+        if _date_pub and len(_date_pub) >= 4 and _date_pub[:4].isdigit():
+            _year_pub = int(_date_pub[:4])
         patents.append({
             "lens_id": item.get("lens_id", ""),
             "title": title,
-            "date_published": item.get("date_published", ""),
-            "year_published": item.get("year_published", None),
+            "date_published": _date_pub,
+            "year_published": _year_pub,
             "jurisdiction": item.get("jurisdiction", ""),
-            "doc_type": item.get("doc_type", ""),
+            "doc_type": item.get("publication_type", ""),
             "inventors": inventors,
             "applicants": applicants,
             "ipc_codes": ipc_codes,
@@ -461,16 +464,15 @@ def fetch_citing_patents_for_doi(doi: str, api_key: str, max_patents: int = 20) 
             }
         },
         "size": min(max_patents, 100),
-        "sort": [{"year_published": "desc"}],
+        "sort": [{"date_published": "desc"}],
         "include": [
             "lens_id",
             "biblio.invention_title",
             "biblio.parties",
             "biblio.classifications_ipcr",
             "date_published",
-            "year_published",
             "jurisdiction",
-            "doc_type",
+            "publication_type",
         ],
     }
 
@@ -523,13 +525,17 @@ def fetch_citing_patents_for_doi(doi: str, api_key: str, max_patents: int = 20) 
             if cl.get("symbol")
         ]
 
+        _date_pub = item.get("date_published", "")
+        _year_pub = None
+        if _date_pub and len(_date_pub) >= 4 and _date_pub[:4].isdigit():
+            _year_pub = int(_date_pub[:4])
         results.append({
             "lens_id":        item.get("lens_id", ""),
             "title":          title,
-            "date_published": item.get("date_published", ""),
-            "year_published": item.get("year_published"),
+            "date_published": _date_pub,
+            "year_published": _year_pub,
             "jurisdiction":   item.get("jurisdiction", ""),
-            "doc_type":       item.get("doc_type", ""),
+            "doc_type":       item.get("publication_type", ""),
             "inventors":      inventors,
             "applicants":     applicants,
             "ipc_codes":      ipc_codes,
