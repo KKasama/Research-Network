@@ -859,7 +859,7 @@ def render_bibliometrix_dashboard(works, lang="ja"):
     tab_labels = [
         tl2("📈 出版トレンド", "📈 Publication Trends"),
         tl2("📰 ジャーナル分布", "📰 Journal Distribution"),
-        tl2("👤 著者生産性", "👤 Author Productivity"),
+        tl2("👤 トップ著者の論文数", "👤 Top Authors by Paper Count"),
         tl2("🔑 キーワード頻度", "🔑 Keyword Frequency"),
         tl2("🏆 被引用ランキング", "🏆 Citation Ranking"),
     ]
@@ -928,7 +928,7 @@ def render_bibliometrix_dashboard(works, lang="ja"):
                 f"📌 Bradford's Law: {len(core)} core journal(s) cover ~1/3 of all papers"
             ))
 
-    # ── Tab 3: 著者生産性 ──
+    # ── Tab 3: トップ著者の論文数 ──
     with tabs[2]:
         author_counts = defaultdict(int)
         for w in works:
@@ -942,7 +942,7 @@ def render_bibliometrix_dashboard(works, lang="ja"):
             if has_plotly:
                 fig = px.bar(df_a.sort_values("Papers"), x="Papers", y="Author",
                              orientation="h",
-                             title=tl2("上位20著者", "Top 20 Authors"),
+                             title=tl2("上位20著者（論文数）", "Top 20 Authors by Paper Count"),
                              labels={"Papers": tl2("論文数","Papers"), "Author": tl2("著者","Author")})
                 fig.update_layout(height=500, yaxis={"tickfont": {"size": 10}})
                 st.plotly_chart(fig, use_container_width=True)
@@ -3236,7 +3236,7 @@ Best suited for a small set of key papers to reveal the intellectual lineage of 
 **含まれる分析**
 - 📈 出版トレンド（年別論文数・成長率）
 - 📰 ジャーナル分布（Bradford則）
-- 👤 著者生産性（Lotkaの法則）
+- 👤 トップ著者の論文数（生産性ランキング）
 - 🔑 キーワード頻度（上位30トピック）
 - 🏆 被引用ランキング（上位50論文）
 
@@ -3246,7 +3246,7 @@ BibTeX形式でエクスポートしてBiblioshinyで追加分析することも
 **Included analyses**
 - 📈 Publication trends (papers per year, growth rate)
 - 📰 Journal distribution (Bradford's Law)
-- 👤 Author productivity (Lotka's Law)
+- 👤 Top authors by paper count (productivity ranking)
 - 🔑 Keyword frequency (top 30 topics)
 - 🏆 Citation ranking (top 50 papers)
 
