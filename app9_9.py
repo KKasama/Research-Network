@@ -795,6 +795,58 @@ def _strip_html(text):
     return re.sub(r'<[^>]+>', '', text or "")
 
 
+
+def works_to_bibliometrix_xlsx(works):
+    """Bibliometrix の 'Load bibliometrix file(s)' で読み込める XLSX を生成する。
+    列名は Bibliometrix データフレームの標準フィールドコードに合わせる。
+    """
+    import io
+    import pandas as pd
+    rows = []
+    for i, w in enumerate(works):
+        authors = w.get("authorships", [])
+        au_parts = []
+        for a in authors:
+            name = (a.get("author") or {}).get("display_name", "")
+            if name:
+                parts = name.strip().split()
+                if len(parts) >= 2:
+                    au_parts.append(f"{parts[-1]}, {' '.join(parts[:-1])}")
+                else:
+                    au_parts.append(name)
+        loc = w.get("primary_location") or {}
+        src = loc.get("source") or {}
+        journal = w.get("_journal") or src.get("display_name", "") or "NA"
+        abstract = reconstruct_abstract(w.get("abstract_inverted_index", {}), work=w)
+        abstract = _strip_html(abstract)
+        kw_list = [t.get("display_name", "") for t in (w.get("topics") or [])[:8] if t.get("display_name")]
+        if not kw_list:
+            kw_list = [c.get("display_name", "") for c in (w.get("concepts") or [])[:5] if c.get("display_name")]
+        keywords = "; ".join(kw_list)
+        doi = (w.get("doi") or "").replace("https://doi.org/", "").replace("http://doi.org/", "")
+        year = str(w.get("publication_year", "") or "")
+        first_au_last = au_parts[0].split(",")[0].strip() if au_parts else "NA"
+        sr = f"{first_au_last}, {year}, {journal[:30]}" if year else f"REF{i}"
+        rows.append({
+            "AU": "; ".join(au_parts) if au_parts else "NA",
+            "TI": _strip_html(w.get("title") or ""),
+            "SO": journal,
+            "AB": abstract,
+            "DE": keywords,
+            "TC": int(w.get("cited_by_count", 0) or 0),
+            "PY": year,
+            "DI": doi,
+            "DB": "OpenAlex",
+            "UT": w.get("id", f"OA{i}"),
+            "SR": sr,
+        })
+    df = pd.DataFrame(rows)
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl")
+    buf.seek(0)
+    return buf.read()
+
+
 def works_to_bibtex(works):
     """OpenAlex/PubMed 形式の論文リストを BibTeX 文字列に変換する。
     v9.4: HTMLタグ除去・journalフィールド必須化でBibliometrix互換性を向上。
@@ -1009,16 +1061,39 @@ def render_bibliometrix_dashboard(works, lang="ja"):
         else:
             st.info(tl2("被引用データがありません。", "No citation data available."))
 
-    # BibTeXダウンロード
+    # ダウンロードセクション
     st.markdown("---")
-    bibtex_str = works_to_bibtex(works)
-    st.download_button(
-        tl2("📥 BibTeX ダウンロード（Biblioshiny用）", "📥 Download BibTeX (for Biblioshiny)"),
-        bibtex_str,
-        file_name="bibliometrix_export.bib",
-        mime="text/plain",
-        use_container_width=True,
-    )
+    st.subheader(tl2("📥 データエクスポート", "📥 Export Data"))
+    _dl1, _dl2 = st.columns(2)
+    with _dl1:
+        xlsx_bytes = works_to_bibliometrix_xlsx(works)
+        st.download_button(
+            tl2("📊 XLSX ダウンロード（Biblioshiny Load用）",
+                "📊 Download XLSX (for Biblioshiny Load)"),
+            xlsx_bytes,
+            file_name="bibliometrix_load.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary",
+        )
+        st.caption(tl2(
+            "💡 Biblioshinyで **「Load bibliometrix file(s)」** を選択してこのXLSXを読み込んでください。",
+            "💡 In Biblioshiny: select **'Load bibliometrix file(s)'** and upload this XLSX."
+        ))
+    with _dl2:
+        bibtex_str = works_to_bibtex(works)
+        st.download_button(
+            tl2("📄 BibTeX ダウンロード（汎用）",
+                "📄 Download BibTeX (generic)"),
+            bibtex_str,
+            file_name="bibliometrix_export.bib",
+            mime="text/plain",
+            use_container_width=True,
+        )
+        st.caption(tl2(
+            "💡 Biblioshinyで **「Dimensions」→「BibTeX」** を選択して読み込んでください。",
+            "💡 In Biblioshiny: select **'Dimensions'** → **'BibTeX'** to import."
+        ))
 
 
 def save_dataset(name, works, meta):
